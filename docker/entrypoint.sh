@@ -10,6 +10,9 @@ if [ "${1:-}" = bulk-scan ]; then
             printf '%s\n' 'codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.' >&2
             exit 2
             ;;
+        *)
+            set -- "$@" --codex features.use_legacy_landlock=true
+            ;;
     esac
 fi
 

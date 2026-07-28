@@ -214,6 +214,15 @@ container write files as your current user:
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.0
+docker compose pull codex-security
+```
+
+Official images are published for Linux `amd64` and `arm64`. Pin a versioned
+image as shown above for reproducible deployments. To build the same image
+locally instead, leave `CODEX_SECURITY_IMAGE` unset and run:
+
+```bash
 docker compose build codex-security
 ```
 
@@ -277,6 +286,12 @@ mount namespaces required by that sandbox; the supplied profile permits only
 the needed namespace operations. The Linux host must allow unprivileged user
 namespaces. Some Docker Desktop virtual machines additionally restrict nested
 mount namespaces, so use a Linux host for production scans.
+
+Ubuntu 24.04 hosts can additionally restrict unprivileged user namespaces
+through AppArmor. For CSV bulk scans, the image automatically selects Codex's
+supported Landlock sandbox fallback. This preserves the nonroot user, dropped
+capabilities, `no-new-privileges`, and the supplied seccomp profile without
+requiring privileged containers or host-wide AppArmor changes.
 
 For environments without Docker Compose, the equivalent lower-level invocation
 is:
