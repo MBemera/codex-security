@@ -1,11 +1,12 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 const testPosix = process.platform === "win32" ? test.skip : test;
-const entrypoint = join(
+const publicEntrypoint = join(
   import.meta.dir,
   "..",
   "..",
@@ -13,6 +14,9 @@ const entrypoint = join(
   "docker",
   "entrypoint.sh",
 );
+const entrypoint = existsSync(publicEntrypoint)
+  ? publicEntrypoint
+  : join(import.meta.dir, "..", "public-repo", "docker", "entrypoint.sh");
 
 async function runEntrypoint(
   args: readonly string[],
