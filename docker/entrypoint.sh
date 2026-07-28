@@ -11,7 +11,11 @@ if [ "${1:-}" = bulk-scan ]; then
             exit 2
             ;;
         *)
-            set -- "$@" --codex features.use_legacy_landlock=true
+            if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] &&
+                IFS= read -r restricted_user_namespaces < /proc/sys/kernel/apparmor_restrict_unprivileged_userns &&
+                [ "$restricted_user_namespaces" = 1 ]; then
+                set -- "$@" --codex features.use_legacy_landlock=true
+            fi
             ;;
     esac
 fi

@@ -288,10 +288,11 @@ namespaces. Some Docker Desktop virtual machines additionally restrict nested
 mount namespaces, so use a Linux host for production scans.
 
 Ubuntu 24.04 hosts can additionally restrict unprivileged user namespaces
-through AppArmor. For CSV bulk scans, the image automatically selects Codex's
-supported Landlock sandbox fallback. This preserves the nonroot user, dropped
-capabilities, `no-new-privileges`, and the supplied seccomp profile without
-requiring privileged containers or host-wide AppArmor changes.
+through AppArmor. For CSV bulk scans on hosts with that restriction enabled,
+the image automatically selects Codex's supported Landlock sandbox fallback.
+Other Linux hosts retain Codex's default sandbox. This preserves the nonroot
+user, dropped capabilities, `no-new-privileges`, and the supplied seccomp
+profile without requiring privileged containers or host-wide AppArmor changes.
 
 For environments without Docker Compose, the equivalent lower-level invocation
 is:

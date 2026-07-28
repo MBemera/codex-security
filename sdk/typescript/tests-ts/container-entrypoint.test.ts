@@ -1,5 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -17,6 +17,18 @@ const publicEntrypoint = join(
 const entrypoint = existsSync(publicEntrypoint)
   ? publicEntrypoint
   : join(import.meta.dir, "..", "public-repo", "docker", "entrypoint.sh");
+const appArmorRestrictsUserNamespaces = (() => {
+  try {
+    return (
+      readFileSync(
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+        "utf8",
+      ).trim() === "1"
+    );
+  } catch {
+    return false;
+  }
+})();
 
 async function runEntrypoint(
   args: readonly string[],
@@ -51,7 +63,7 @@ async function runEntrypoint(
 
 describe("customer container entrypoint", () => {
   testPosix(
-    "preserves CSV scan arguments and selects the supported Linux sandbox",
+    "preserves CSV scan arguments and selects Landlock only when AppArmor requires it",
     async () => {
       const result = await runEntrypoint([
         "bulk-scan",
@@ -72,8 +84,9 @@ describe("customer container entrypoint", () => {
           "/output",
           "--workers",
           "2",
-          "--codex",
-          "features.use_legacy_landlock=true",
+          ...(appArmorRestrictsUserNamespaces
+            ? ["--codex", "features.use_legacy_landlock=true"]
+            : []),
           "",
         ].join("\n"),
       );
