@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: container-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  group: container-release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
   cancel-in-progress: false
 
 permissions:
@@ -164,6 +164,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: container
+    permissions:
+      contents: read
+      packages: read
     outputs:
       image: ${{ steps.release.outputs.image }}
       version: ${{ steps.release.outputs.version }}
@@ -208,6 +211,35 @@ jobs:
 
           printf 'image=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight public package and immutable release version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          package="${GITHUB_REPOSITORY#*/}"
+          endpoint="orgs/$owner/packages/container/$package"
+
+          if ! metadata="$(gh api "$endpoint" 2>/dev/null)"; then
+            echo "::error::A repository administrator must bootstrap ghcr.io/$owner/$package, make the package public, and grant this repository package access before approving publication."
+            exit 1
+          fi
+
+          if [[ "$(jq -r '.visibility' <<< "$metadata")" != public ]]; then
+            echo "::error::ghcr.io/$owner/$package must be public before any release image is pushed."
+            exit 1
+          fi
+
+          if gh api --paginate "$endpoint/versions?per_page=100" |
+            jq --exit-status --slurp --arg version "$VERSION" '
+              any(.[]; any(.[]; any(.metadata.container.tags[]?; . == $version)))
+            ' > /dev/null; then
+            echo "::error::Container version $VERSION already exists; stable version tags cannot be overwritten."
+            exit 1
+          fi
 
   publish-platform:
     name: publish-linux-${{ matrix.architecture }}
@@ -279,17 +311,18 @@ jobs:
           compression-level: 0
 
   manifest:
-    name: publish-and-verify-multiarchitecture-image
+    name: publish-and-verify-multiarchitecture-candidate
     needs:
       - authorize
       - publish-platform
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      attestations: write
       contents: read
-      id-token: write
       packages: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+      candidate: ${{ steps.manifest.outputs.candidate }}
 
     steps:
       - name: Checkout approved customer configuration
@@ -314,11 +347,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish versioned and immutable multiarchitecture tags
+      - name: Publish provisional multiarchitecture candidate
         id: manifest
         env:
           IMAGE: ${{ needs.authorize.outputs.image }}
-          VERSION: ${{ needs.authorize.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -341,51 +373,43 @@ jobs:
             references+=("$IMAGE@sha256:$digest")
           done
 
+          candidate="$IMAGE:release-candidate-$GITHUB_SHA"
           docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-$GITHUB_SHA" \
-            --tag "$IMAGE:latest" \
+            --tag "$candidate" \
             "${references[@]}"
 
-          manifest_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" | awk '/^Digest:/{print $2; exit}')"
+          manifest_digest="$(docker buildx imagetools inspect "$candidate" | awk '/^Digest:/{print $2; exit}')"
           if [[ ! "$manifest_digest" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
             echo 'The registry did not return a valid multiarchitecture image digest.' >&2
             exit 1
           fi
           printf 'digest=%s\n' "$manifest_digest" >> "$GITHUB_OUTPUT"
+          printf 'candidate=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
 
-          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw |
+          docker buildx imagetools inspect "$candidate" --raw |
             jq --exit-status '
               [.manifests[] | select(.platform.os == "linux") | .platform.architecture]
               | (index("amd64") != null and index("arm64") != null)
             ' > /dev/null
 
-      - name: Attest the published multiarchitecture image
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
-        with:
-          push-to-registry: true
-          subject-name: ${{ needs.authorize.outputs.image }}
-          subject-digest: ${{ steps.manifest.outputs.digest }}
-
-      - name: Verify customers can pull without GitHub credentials
+      - name: Verify customers can pull the candidate without GitHub credentials
         env:
-          IMAGE: ${{ needs.authorize.outputs.image }}
-          VERSION: ${{ needs.authorize.outputs.version }}
+          CANDIDATE: ${{ steps.manifest.outputs.candidate }}
         shell: bash
         run: |
           set -euo pipefail
           docker logout ghcr.io
-          if ! docker pull "$IMAGE:$VERSION"; then
-            echo '::error::The release image cannot be pulled anonymously. A repository administrator must make the GitHub container package public before announcing the release.'
+          if ! docker pull "$CANDIDATE"; then
+            echo '::error::The verified candidate cannot be pulled anonymously; no stable release tags have been published.'
             exit 1
           fi
-          docker run --rm "$IMAGE:$VERSION" --version
-          docker run --rm "$IMAGE:$VERSION" bulk-scan --help
-          docker run --rm "$IMAGE:$VERSION" info --json
+          docker run --rm "$CANDIDATE" --version
+          docker run --rm "$CANDIDATE" bulk-scan --help
+          docker run --rm "$CANDIDATE" info --json
 
-      - name: Verify hardened customer Compose against the public image
+      - name: Verify hardened customer Compose against the public candidate
         env:
-          CODEX_SECURITY_IMAGE: ${{ needs.authorize.outputs.image }}:${{ needs.authorize.outputs.version }}
+          CODEX_SECURITY_IMAGE: ${{ steps.manifest.outputs.candidate }}
         shell: bash
         run: |
           set -euo pipefail
@@ -405,3 +429,88 @@ jobs:
             printf 'Unexpected empty-repository scan behavior:\n%s\n' "$output" >&2
             exit 1
           fi
+
+  attest:
+    name: attest-verified-multiarchitecture-candidate
+    needs:
+      - authorize
+      - manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+
+    steps:
+      - name: Sign verified multiarchitecture candidate provenance
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          push-to-registry: true
+          subject-name: ${{ needs.authorize.outputs.image }}
+          subject-digest: ${{ needs.manifest.outputs.digest }}
+
+  promote:
+    name: promote-verified-and-attested-release
+    needs:
+      - authorize
+      - manifest
+      - attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote the verified, attested, immutable image digest
+        env:
+          IMAGE: ${{ needs.authorize.outputs.image }}
+          VERSION: ${{ needs.authorize.outputs.version }}
+          MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$MANIFEST_DIGEST" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
+            echo 'The verified release did not provide a valid immutable digest.' >&2
+            exit 1
+          fi
+
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "::error::Container version $VERSION already exists; stable version tags cannot be overwritten."
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:sha-$GITHUB_SHA" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE@$MANIFEST_DIGEST"
+
+          actual_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" | awk '/^Digest:/{print $2; exit}')"
+          if [[ "$actual_digest" != "$MANIFEST_DIGEST" ]]; then
+            echo '::error::The promoted stable tag does not reference the verified and attested candidate digest.'
+            exit 1
+          fi
+
+      - name: Verify the stable release is publicly pullable
+        env:
+          IMAGE: ${{ needs.authorize.outputs.image }}
+          VERSION: ${{ needs.authorize.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          docker pull "$IMAGE:$VERSION"
+          docker run --rm "$IMAGE:$VERSION" --version
