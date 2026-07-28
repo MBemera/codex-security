@@ -71,6 +71,35 @@ jobs:
           docker run --rm codex-security:release-candidate info --json
           [[ "$(docker run --rm --entrypoint id codex-security:release-candidate -u)" == 10001 ]]
 
+      - name: Verify host-aware AppArmor sandbox selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/sh codex-security:release-candidate -ec '
+            command_directory="$(mktemp -d)"
+            trap '\''rm -rf "$command_directory"'\'' EXIT
+            printf "%s\\n" "#!/bin/sh" '\''printf "%s\\n" "$@"'\'' > "$command_directory/codex-security"
+            chmod 755 "$command_directory/codex-security"
+
+            actual="$(
+              PATH="$command_directory:$PATH" \
+                /usr/local/bin/codex-security-entrypoint \
+                bulk-scan /input/repositories.csv --output-dir /output
+            )"
+            restricted_user_namespaces=
+            if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+              IFS= read -r restricted_user_namespaces \
+                < /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+            fi
+
+            if [ "$restricted_user_namespaces" = 1 ]; then
+              printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true
+            elif printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true; then
+              printf "%s\\n" "Landlock must not be forced on an unrestricted host." >&2
+              exit 1
+            fi
+          '
+
       - name: Verify hardened Codex command sandbox
         shell: bash
         run: |
