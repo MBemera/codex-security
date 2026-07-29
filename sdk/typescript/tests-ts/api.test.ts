@@ -1334,6 +1334,7 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
       CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
+      CODEX_SECURITY_TARGET_REVISION: "deadbeef",
     });
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
       default_permissions: "codex_security_scan",
@@ -1355,6 +1356,8 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
     expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
+    expect(prompt).toContain("$CODEX_SECURITY_TARGET_REVISION");
+    expect(prompt).toContain('use exactly "git_revision"');
     expect(prompt).toContain("codex-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(

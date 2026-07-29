@@ -586,6 +586,9 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
+        ...(expectation.repositoryRevision === null
+          ? {}
+          : { CODEX_SECURITY_TARGET_REVISION: expectation.repositoryRevision }),
         ...(knowledgeBase === null
           ? {}
           : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
@@ -1251,6 +1254,7 @@ async function scanPrompt(
     'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
+    'When "$CODEX_SECURITY_TARGET_REVISION" is present and the Git worktree is clean, use exactly "git_revision" as scan.target.kind and "$CODEX_SECURITY_TARGET_REVISION" as scan.target.revision; do not label a clean pinned checkout as "git_worktree".',
     'Use exactly "codex-security-plugin" as scan.producer.name.',
     ...(hasConfigPath
       ? [
