@@ -14,13 +14,10 @@ Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security
 npm install @openai/codex-security
 npx @openai/codex-security login
 npx @openai/codex-security scan .
-npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
-npx @openai/codex-security scan . --verbose
-CODEX_SECURITY_LOG_LEVEL=debug npx @openai/codex-security scan .
-LOG_LEVEL=debug npx @openai/codex-security scan .
 ```
 
-For CI, set `OPENAI_API_KEY` instead of signing in.
+For CI, set `OPENAI_API_KEY` instead of signing in. To select a different model
+and reasoning effort, add `--model gpt-5.6-terra --effort high` to a scan.
 
 If both a ChatGPT sign-in and an API key are available, interactive scans ask
 which credential to use. CI and other noninteractive scans keep the existing
@@ -41,6 +38,24 @@ unset OPENAI_API_KEY CODEX_API_KEY
 Scan history is stored in the Codex Security workbench state directory. If that
 directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
 directory outside the repository.
+
+## Verbose diagnostics
+
+Add `--verbose` to print redacted scan lifecycle diagnostics to stderr:
+
+```bash
+npx @openai/codex-security scan . --verbose
+```
+
+For CI or repeated invocations, set the product-specific log level instead:
+
+```bash
+CODEX_SECURITY_LOG_LEVEL=debug npx @openai/codex-security scan .
+```
+
+Promptfoo-compatible `LOG_LEVEL=debug` also enables verbose diagnostics.
+`CODEX_SECURITY_LOG_LEVEL` takes precedence; `--verbose` always enables logging.
+Structured JSON results remain on stdout.
 
 ## TypeScript SDK
 
