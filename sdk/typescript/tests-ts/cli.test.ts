@@ -2147,6 +2147,75 @@ describe("CLI", () => {
     expect(stderr.text()).toContain('reasoning_effort="high"');
   });
 
+  test("reports effective model and reasoning settings from the selected Codex profile", async () => {
+    const scenarios = [
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-sol"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="high"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "high",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "low",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="medium"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "medium",
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            ...scenario.overrides.flatMap((override) => ["--codex", override]),
+            "--verbose",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const configuration = stderr
+        .text()
+        .split("\n")
+        .find((line) =>
+          line.startsWith("codex-security: debug: scan.configuration"),
+        );
+      expect(configuration).toBeDefined();
+      expect(configuration).toContain('profile="review"');
+      expect(configuration).toContain(
+        `model=${JSON.stringify(scenario.model)}`,
+      );
+      expect(configuration).toContain(
+        `reasoning_effort=${JSON.stringify(scenario.reasoningEffort)}`,
+      );
+    }
+  });
+
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -2177,6 +2246,50 @@ describe("CLI", () => {
     );
     expect(stderr.text()).toContain('model="gpt-original"');
     expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reports selected profile settings for verbose scan reruns", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                profile: "review",
+                model: "gpt-5.6-sol",
+                model_reasoning_effort: "low",
+                profiles: {
+                  review: {
+                    model: "gpt-5.6-terra",
+                    model_reasoning_effort: "high",
+                  },
+                },
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    const configuration = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.configuration"),
+      );
+    expect(configuration).toBeDefined();
+    expect(configuration).toContain('profile="review"');
+    expect(configuration).toContain('model="gpt-5.6-terra"');
+    expect(configuration).toContain('reasoning_effort="high"');
   });
 
   test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {

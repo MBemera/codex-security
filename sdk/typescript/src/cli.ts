@@ -2434,9 +2434,28 @@ async function runScan(
           arguments_.effort,
         ),
     };
-    const configuredModel = config.codexOverrides?.["model"];
+    const configuredProfiles = config.codexOverrides?.["profiles"];
+    const selectedProfileName = config.codexOverrides?.["profile"];
+    const selectedProfileValue =
+      typeof selectedProfileName === "string" &&
+      configuredProfiles !== undefined &&
+      isJsonObject(configuredProfiles)
+        ? configuredProfiles[selectedProfileName]
+        : undefined;
+    const selectedProfile =
+      selectedProfileValue !== undefined && isJsonObject(selectedProfileValue)
+        ? selectedProfileValue
+        : undefined;
+    const profileModel = selectedProfile?.["model"];
+    const profileReasoningEffort = selectedProfile?.["model_reasoning_effort"];
+    const configuredModel =
+      typeof profileModel === "string"
+        ? profileModel
+        : config.codexOverrides?.["model"];
     const configuredReasoningEffort =
-      config.codexOverrides?.["model_reasoning_effort"];
+      typeof profileReasoningEffort === "string"
+        ? profileReasoningEffort
+        : config.codexOverrides?.["model_reasoning_effort"];
     const effectiveModel =
       typeof configuredModel === "string"
         ? configuredModel
@@ -2498,6 +2517,10 @@ async function runScan(
               : "repository",
       requested_auth: auth ?? "auto",
       dry_run: arguments_.dryRun,
+      profile:
+        typeof selectedProfileName === "string"
+          ? selectedProfileName
+          : undefined,
       model: effectiveModel,
       reasoning_effort: effectiveReasoningEffort,
     });
