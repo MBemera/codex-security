@@ -216,8 +216,8 @@ try {
     join(installedRoot, "README.md"),
     "utf8",
   );
-  assert.match(installedReadme, /\bauthentication tokens\b/u);
-  assert.match(installedReadme, /\btoken counts\b/u);
+  assert.match(installedReadme, /\bauthentication\s+tokens\b/u);
+  assert.match(installedReadme, /\btoken\s+counts\b/u);
 
   assert.deepEqual(
     await pluginFiles(join(installedRoot, "_bundled_plugin")),
