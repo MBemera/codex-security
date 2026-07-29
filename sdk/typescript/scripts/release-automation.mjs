@@ -73,22 +73,36 @@ export function requireReleaseIncrease(version, previousVersion) {
   return version;
 }
 
-export function requirePublishedReleaseIncrease(version, publishedVersions) {
+export function publishedReleaseMode(version, publishedVersions) {
   releaseVersion({ name: packageName, version });
   if (!Array.isArray(publishedVersions)) {
     throw new Error("Published npm release versions must be an array.");
   }
 
+  let mode = "publish";
   for (const publishedVersion of publishedVersions) {
     if (
       typeof publishedVersion === "string" &&
-      stableVersion.test(publishedVersion) &&
-      compareReleaseVersions(version, publishedVersion) <= 0
+      stableVersion.test(publishedVersion)
     ) {
-      throw new Error(
-        "Release version must be greater than every published stable version.",
-      );
+      const comparison = compareReleaseVersions(version, publishedVersion);
+      if (comparison < 0) {
+        throw new Error(
+          "Release version must be greater than every published stable version.",
+        );
+      }
+      if (comparison === 0) mode = "recover";
     }
+  }
+
+  return mode;
+}
+
+export function requirePublishedReleaseIncrease(version, publishedVersions) {
+  if (publishedReleaseMode(version, publishedVersions) !== "publish") {
+    throw new Error(
+      "Release version must be greater than every published stable version.",
+    );
   }
 
   return version;
@@ -369,10 +383,14 @@ export function releaseHistory(tag, history) {
     }
   }
 
-  const makeLatest = Array.from(publishedGitHubTags).every(
-    (candidate) =>
-      compareReleaseVersions(version, candidate.slice("npm-v".length)) > 0,
-  );
+  const makeLatest =
+    Array.from(publishedVersions).every(
+      (candidate) => compareReleaseVersions(version, candidate) >= 0,
+    ) &&
+    Array.from(publishedGitHubTags).every(
+      (candidate) =>
+        compareReleaseVersions(version, candidate.slice("npm-v".length)) > 0,
+    );
 
   return { previousTag, makeLatest };
 }
@@ -567,7 +585,79 @@ export function verifySignatureAudit(report, archive, expected) {
   };
 }
 
-export function verifyGitHubRelease(release, archive, expectedTag, assetName) {
+export function verifyRecoveredSignatureAudit(report, archive, expected) {
+  const version = releaseVersion({
+    name: packageName,
+    version: expected.version,
+  });
+  if (
+    typeof expected.repository !== "string" ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(expected.repository)
+  ) {
+    throw new Error("Verified provenance requires an exact GitHub repository.");
+  }
+
+  const verified = Array.isArray(report?.verified)
+    ? report.verified.find(
+        (candidate) =>
+          candidate?.name === packageName && candidate.version === version,
+      )
+    : undefined;
+  if (verified === undefined) {
+    throw new Error(
+      "The published package must have a cryptographically verified attestation.",
+    );
+  }
+
+  const provenance = Array.isArray(verified.attestationBundles)
+    ? verified.attestationBundles.find(
+        (candidate) => candidate?.predicateType === provenancePredicate,
+      )
+    : undefined;
+  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
+  if (typeof encodedStatement !== "string") {
+    throw new Error("The verified SLSA provenance bundle is missing.");
+  }
+
+  let statement;
+  try {
+    statement = JSON.parse(
+      Buffer.from(encodedStatement, "base64").toString("utf8"),
+    );
+  } catch {
+    throw new Error("The verified SLSA provenance statement is invalid.");
+  }
+
+  const prefix = `https://github.com/${expected.repository}/actions/runs/`;
+  const invocation = statement?.predicate?.runDetails?.metadata?.invocationId;
+  if (typeof invocation !== "string" || !invocation.startsWith(prefix)) {
+    throw new Error(
+      "Verified SLSA provenance must identify the protected release run.",
+    );
+  }
+  const match = /^([1-9][0-9]*)\/attempts\/([1-9][0-9]*)$/u.exec(
+    invocation.slice(prefix.length),
+  );
+  if (match === null) {
+    throw new Error(
+      "Verified SLSA provenance must identify the protected release run.",
+    );
+  }
+
+  return verifySignatureAudit(report, archive, {
+    ...expected,
+    version,
+    runId: match[1],
+  });
+}
+
+export function verifyGitHubRelease(
+  release,
+  archive,
+  expectedTag,
+  assetName,
+  downloadedArchive,
+) {
   if (release?.tag_name !== expectedTag) {
     throw new Error("Existing GitHub Release must match the release tag.");
   }
@@ -580,7 +670,18 @@ export function verifyGitHubRelease(release, archive, expectedTag, assetName) {
   const asset = Array.isArray(release.assets)
     ? release.assets.find((candidate) => candidate?.name === assetName)
     : undefined;
-  if (asset?.digest !== expectedDigest) {
+  const publishedDigest = asset?.digest;
+  const downloadedDigest =
+    downloadedArchive === undefined
+      ? undefined
+      : "sha256:" +
+        createHash("sha256").update(downloadedArchive).digest("hex");
+  if (
+    asset === undefined ||
+    (publishedDigest != null && publishedDigest !== expectedDigest) ||
+    (downloadedArchive === undefined && publishedDigest !== expectedDigest) ||
+    (downloadedArchive !== undefined && downloadedDigest !== expectedDigest)
+  ) {
     throw new Error(
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
@@ -625,6 +726,12 @@ function main() {
     console.log(
       requirePublishedReleaseIncrease(process.argv[3], publishedVersions),
     );
+    return;
+  }
+
+  if (command === "release-mode" && process.argv.length === 4) {
+    const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
+    console.log(publishedReleaseMode(process.argv[3], publishedVersions));
     return;
   }
 
@@ -678,7 +785,22 @@ function main() {
     return;
   }
 
-  if (command === "verify-github-release" && process.argv.length === 5) {
+  if (command === "verify-recovered-provenance" && process.argv.length === 7) {
+    const report = JSON.parse(readFileSync(0, "utf8"));
+    const archive = readFileSync(process.argv[3]);
+    const verified = verifyRecoveredSignatureAudit(report, archive, {
+      version: process.argv[4],
+      gitHead: process.argv[5],
+      repository: process.argv[6],
+    });
+    console.log(JSON.stringify(verified));
+    return;
+  }
+
+  if (
+    command === "verify-github-release" &&
+    (process.argv.length === 5 || process.argv.length === 6)
+  ) {
     const release = JSON.parse(readFileSync(0, "utf8"));
     const archivePath = process.argv[3];
     const archive = readFileSync(archivePath);
@@ -687,6 +809,7 @@ function main() {
       archive,
       process.argv[4],
       basename(archivePath),
+      process.argv[5] === undefined ? undefined : readFileSync(process.argv[5]),
     );
     console.log(JSON.stringify(verified));
     return;
@@ -698,12 +821,15 @@ function main() {
       "require-increase <version> <previous-version>, " +
       "require-published-increase <version> " +
       "(published npm versions JSON from stdin), " +
+      "release-mode <version> (published npm versions JSON from stdin), " +
       "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
       "verify-provenance <archive> <version> <git-head> <repository> <run-id> " +
-      "(signature audit JSON from stdin), or " +
-      "verify-github-release <archive> <tag> " +
+      "(signature audit JSON from stdin), " +
+      "verify-recovered-provenance <archive> <version> <git-head> " +
+      "<repository> (signature audit JSON from stdin), or " +
+      "verify-github-release <archive> <tag> [downloaded-asset] " +
       "(GitHub release JSON from stdin).",
   );
 }

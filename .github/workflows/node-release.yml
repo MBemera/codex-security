@@ -24,6 +24,8 @@ jobs:
       BUN_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      mode: ${{ steps.release.outputs.mode }}
+      version: ${{ steps.release.outputs.version }}
 
     steps:
       - name: Checkout repository
@@ -93,10 +95,18 @@ jobs:
           published_versions="$(
             sfw npm view @openai/codex-security versions --json
           )"
-          printf '%s\n' "$published_versions" |
-            node sdk/typescript/scripts/release-automation.mjs \
-              require-published-increase "$version" >/dev/null
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mode="$(
+            printf '%s\n' "$published_versions" |
+              node sdk/typescript/scripts/release-automation.mjs \
+                release-mode "$version"
+          )"
+          if [[ "$mode" == "recover" ]]; then
+            echo "Recovering the already-published npm release."
+          fi
+          {
+            printf 'version=%s\n' "$version"
+            printf 'mode=%s\n' "$mode"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
@@ -122,6 +132,49 @@ jobs:
         env:
           CODEX_SECURITY_EXPECTED_GIT_HEAD: ${{ github.sha }}
         run: pnpm run check:package ../../dist/*.tgz
+
+      - name: Recover the published npm release archive
+        if: steps.release.outputs.mode == 'recover'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          built_archives=(dist/*.tgz)
+          if (( ${#built_archives[@]} != 1 )); then
+            echo "Expected exactly one verified local release tarball." >&2
+            exit 1
+          fi
+
+          recovery="$(mktemp -d)"
+          trap 'rm -rf "$recovery"' EXIT
+          npm pack "@openai/codex-security@$RELEASE_VERSION" \
+            --ignore-scripts \
+            --pack-destination "$recovery" \
+            --registry=https://registry.npmjs.org/
+
+          published_archives=("$recovery"/*.tgz)
+          if (( ${#published_archives[@]} != 1 )); then
+            echo "Expected exactly one published npm release tarball." >&2
+            exit 1
+          fi
+
+          metadata="$(
+            npm view "@openai/codex-security@$RELEASE_VERSION" \
+              name version gitHead dist.integrity dist.attestations \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"
+          printf '%s\n' "$metadata" |
+            node sdk/typescript/scripts/release-automation.mjs \
+              verify-publication \
+              "${published_archives[0]}" \
+              "$RELEASE_VERSION" \
+              "$GITHUB_SHA"
+
+          cp "${published_archives[0]}" "${built_archives[0]}"
 
       - name: Smoke test package
         shell: bash
@@ -156,12 +209,37 @@ jobs:
       id-token: write
 
     steps:
+      - name: Checkout release verification source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
-          node-version: "24"
+          node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
+
+      - name: Install provenance-capable npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_tools="$RUNNER_TEMP/codex-security-provenance-npm"
+          npm install \
+            --prefix "$npm_tools" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            --registry=https://openai.firewall.socket.dev/npm/ \
+            npm@11.12.1
+
+          if [[ "$("$npm_tools/node_modules/.bin/npm" --version)" != "11.12.1" ]]; then
+            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
+            exit 1
+          fi
+          printf '%s\n' "$npm_tools/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Verify bundled trusted-publishing npm
         shell: bash
@@ -193,8 +271,57 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
 
+      - name: Verify recovered npm release provenance
+        if: needs.verify.outputs.mode == 'recover'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          release_version="$RELEASE_VERSION"
+          archives=(dist/*.tgz)
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected exactly one recovered npm release tarball." >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+
+          metadata="$(
+            npm view "@openai/codex-security@$release_version" \
+              name version gitHead dist.integrity dist.attestations \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"
+          printf '%s\n' "$metadata" |
+            node sdk/typescript/scripts/release-automation.mjs \
+              verify-publication "$archive" "$release_version" "$GITHUB_SHA"
+
+          consumer="$(mktemp -d)"
+          trap 'rm -rf "$consumer"' EXIT
+          npm install \
+            --prefix "$consumer" \
+            --ignore-scripts \
+            --omit=optional \
+            --no-audit \
+            --no-fund \
+            --registry=https://registry.npmjs.org/ \
+            "@openai/codex-security@$release_version"
+          npm audit signatures \
+            --prefix "$consumer" \
+            --registry=https://registry.npmjs.org/ \
+            --json \
+            --include-attestations |
+            node sdk/typescript/scripts/release-automation.mjs \
+              verify-recovered-provenance \
+              "$archive" \
+              "$release_version" \
+              "$GITHUB_SHA" \
+              "$GITHUB_REPOSITORY"
+
       - name: Publish initial npm release
-        if: github.ref_name == 'npm-v0.1.0'
+        if: needs.verify.outputs.mode == 'publish' && github.ref_name == 'npm-v0.1.0'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH_TOKEN }}
         shell: bash
@@ -207,5 +334,5 @@ jobs:
           npm publish ./dist/*.tgz --provenance --access public --tag latest
 
       - name: Publish to npm using trusted publishing
-        if: github.ref_name != 'npm-v0.1.0'
+        if: needs.verify.outputs.mode == 'publish' && github.ref_name != 'npm-v0.1.0'
         run: npm publish ./dist/*.tgz --provenance --access public --tag latest

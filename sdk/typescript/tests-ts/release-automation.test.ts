@@ -16,6 +16,10 @@ type ReleaseAutomation = {
   ) => string;
   compareReleaseVersions: (left: string, right: string) => -1 | 0 | 1;
   requireReleaseIncrease: (version: string, previousVersion: string) => string;
+  publishedReleaseMode: (
+    version: string,
+    publishedVersions: unknown,
+  ) => "publish" | "recover";
   requirePublishedReleaseIncrease: (
     version: string,
     publishedVersions: unknown,
@@ -54,11 +58,27 @@ type ReleaseAutomation = {
     runId: string;
     sha512: string;
   };
+  verifyRecoveredSignatureAudit: (
+    report: ReleaseMetadata,
+    archive: Uint8Array,
+    expected: {
+      version: string;
+      gitHead: string;
+      repository: string;
+    },
+  ) => {
+    version: string;
+    gitHead: string;
+    repository: string;
+    runId: string;
+    sha512: string;
+  };
   verifyGitHubRelease: (
     release: ReleaseMetadata,
     archive: Uint8Array,
     expectedTag: string,
     assetName: string,
+    downloadedArchive?: Uint8Array,
   ) => { tag: string; asset: string; digest: string };
 };
 
@@ -71,10 +91,12 @@ const {
   releaseTagVersion,
   compareReleaseVersions,
   requireReleaseIncrease,
+  publishedReleaseMode,
   requirePublishedReleaseIncrease,
   releaseHistory,
   verifyPublishedRelease,
   verifySignatureAudit,
+  verifyRecoveredSignatureAudit,
   verifyGitHubRelease,
 } = (await import(automationScript.href)) as ReleaseAutomation;
 
@@ -473,6 +495,34 @@ describe("monotonic stable release versions", () => {
     ).toBe("0.1.11");
   });
 
+  test("identifies a strictly increasing version as a new publication", () => {
+    expect(publishedReleaseMode("0.1.3", ["0.1.0", "0.1.2"])).toBe("publish");
+  });
+
+  test("identifies the current published version as recoverable", () => {
+    expect(publishedReleaseMode("0.1.2", ["0.1.0", "0.1.2"])).toBe("recover");
+  });
+
+  test("never recovers a published version below a newer stable release", () => {
+    expect(() => publishedReleaseMode("0.1.2", ["0.1.2", "0.1.3"])).toThrow(
+      "Release version must be greater than every published stable version.",
+    );
+  });
+
+  test("ignores prerelease versions when determining recovery", () => {
+    expect(publishedReleaseMode("0.1.2", ["0.1.2", "0.1.3-beta.1"])).toBe(
+      "recover",
+    );
+  });
+
+  test("fails safely when recovery history is malformed", () => {
+    for (const publishedVersions of [null, {}, "0.1.2"]) {
+      expect(() => publishedReleaseMode("0.1.2", publishedVersions)).toThrow(
+        "Published npm release versions must be an array.",
+      );
+    }
+  });
+
   test("rejects a manual release below the highest published version", () => {
     expect(() =>
       requirePublishedReleaseIncrease("1.9.9", ["1.9.8", "2.0.0"]),
@@ -514,6 +564,16 @@ describe("published GitHub and npm release history", () => {
       releaseHistory("npm-v0.1.2", {
         registryVersions: ["0.1.1", "0.1.2", "0.1.3"],
         githubReleaseTags: ["npm-v0.1.3"],
+        reachableTags: ["npm-v0.1.1"],
+      }),
+    ).toEqual({ previousTag: "npm-v0.1.1", makeLatest: false });
+  });
+
+  test("never marks a backfill latest when a newer npm release lacks GitHub notes", () => {
+    expect(
+      releaseHistory("npm-v0.1.2", {
+        registryVersions: ["0.1.1", "0.1.2", "0.1.3"],
+        githubReleaseTags: [],
         reachableTags: ["npm-v0.1.1"],
       }),
     ).toEqual({ previousTag: "npm-v0.1.1", makeLatest: false });
@@ -650,6 +710,60 @@ describe("cryptographically verified npm provenance", () => {
       runId: releaseRun,
       sha512,
     });
+  });
+
+  test("recovers a published archive using its authenticated original run", () => {
+    expect(
+      verifyRecoveredSignatureAudit(signatureAudit(), archive, {
+        version: "0.1.2",
+        gitHead: releaseCommit,
+        repository: releaseRepository,
+      }),
+    ).toEqual({
+      version: "0.1.2",
+      gitHead: releaseCommit,
+      repository: releaseRepository,
+      runId: releaseRun,
+      sha512,
+    });
+  });
+
+  test("rejects a recovered archive whose certificate identifies another run", () => {
+    expect(() =>
+      verifyRecoveredSignatureAudit(
+        signatureAudit({ runId: "30481596228" }),
+        archive,
+        {
+          version: "0.1.2",
+          gitHead: releaseCommit,
+          repository: releaseRepository,
+        },
+      ),
+    ).toThrow("The Fulcio certificate must identify the exact release run.");
+  });
+
+  test("rejects a recovered archive signed for a different source commit", () => {
+    expect(() =>
+      verifyRecoveredSignatureAudit(signatureAudit(), archive, {
+        version: "0.1.2",
+        gitHead: "0000000000000000000000000000000000000000",
+        repository: releaseRepository,
+      }),
+    ).toThrow("npm package gitHead must match release commit");
+  });
+
+  test("rejects a recovery without an authentic provenance bundle", () => {
+    expect(() =>
+      verifyRecoveredSignatureAudit(
+        signatureAudit({ includeBundle: false }),
+        archive,
+        {
+          version: "0.1.2",
+          gitHead: releaseCommit,
+          repository: releaseRepository,
+        },
+      ),
+    ).toThrow("The verified SLSA provenance bundle is missing.");
   });
 
   test("accepts the real Fulcio certificate in the legacy chain format", () => {
@@ -944,6 +1058,60 @@ describe("idempotent GitHub release verification", () => {
     });
   });
 
+  test("verifies downloaded release bytes when GitHub omits the asset digest", () => {
+    const release = githubRelease();
+
+    expect(
+      verifyGitHubRelease(
+        {
+          ...release,
+          assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
+        },
+        archive,
+        "npm-v0.1.2",
+        "openai-codex-security-0.1.2.tgz",
+        archive,
+      ),
+    ).toEqual({
+      tag: "npm-v0.1.2",
+      asset: "openai-codex-security-0.1.2.tgz",
+      digest,
+    });
+  });
+
+  test("rejects a digestless release asset without its downloaded bytes", () => {
+    expect(() =>
+      verifyGitHubRelease(
+        {
+          ...githubRelease(),
+          assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
+        },
+        archive,
+        "npm-v0.1.2",
+        "openai-codex-security-0.1.2.tgz",
+      ),
+    ).toThrow(
+      "Existing GitHub Release asset must match the verified npm artifact.",
+    );
+  });
+
+  test("rejects downloaded release bytes that differ from the npm archive", () => {
+    expect(() =>
+      verifyGitHubRelease(
+        {
+          ...githubRelease(),
+          assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
+        },
+        archive,
+        "npm-v0.1.2",
+        "openai-codex-security-0.1.2.tgz",
+        Buffer.from("different downloaded GitHub release"),
+      ),
+    ).toThrow(
+      "Existing GitHub Release asset must match the verified npm artifact.",
+    );
+  });
+
   test("rejects a GitHub release for another tag", () => {
     expect(() =>
       verifyGitHubRelease(
@@ -1077,7 +1245,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(protectedReleaseWorkflow).toContain(
       "sfw npm view @openai/codex-security versions",
     );
-    expect(protectedReleaseWorkflow).toContain("require-published-increase");
+    expect(protectedReleaseWorkflow).toContain("release-mode");
   });
 
   test("rejects manually publishing a tag older than npm latest", () => {
@@ -1112,6 +1280,54 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "Release version must be greater than every published stable version.",
+    );
+  });
+
+  test("allows the exact already-published release to enter verified recovery", () => {
+    const script = workflowStepShell(
+      protectedReleaseWorkflow,
+      "Validate release tag",
+    );
+    const checkedOutVersion = releaseVersion(
+      JSON.parse(
+        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+      ) as ReleaseMetadata,
+    );
+    const checkedOutTag = `npm-v${checkedOutVersion}`;
+    const mocks = [
+      "git() { return 0; }",
+      `sfw() { printf '%s\\n' '["0.1.0","${checkedOutVersion}"]'; }`,
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REF: `refs/tags/${checkedOutTag}`,
+        GITHUB_REF_NAME: checkedOutTag,
+        GITHUB_REF_TYPE: "tag",
+        GITHUB_SHA: releaseCommit,
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Recovering the already-published npm release.",
+    );
+  });
+
+  test("verifies recovered packages without republishing immutable versions", () => {
+    expect(protectedReleaseWorkflow).toContain(
+      "Recover the published npm release archive",
+    );
+    expect(protectedReleaseWorkflow).toContain(
+      "Verify recovered npm release provenance",
+    );
+    expect(protectedReleaseWorkflow).toContain("verify-recovered-provenance");
+    expect(protectedReleaseWorkflow).toContain(
+      "needs.verify.outputs.mode == 'publish'",
     );
   });
 
@@ -1265,6 +1481,15 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).toContain("--ignore-scripts");
   });
 
+  test("downloads and verifies existing GitHub release asset bytes", () => {
+    expect(githubReleaseWorkflow).toContain(
+      'gh release download "$RELEASE_TAG"',
+    );
+    expect(githubReleaseWorkflow).toContain(
+      'verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG"',
+    );
+  });
+
   test("cryptographically verifies the exact npm provenance bundle", () => {
     expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
     expect(githubReleaseWorkflow).toContain(
@@ -1272,7 +1497,19 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
-    expect(githubReleaseWorkflow).toContain("verify-provenance");
+    expect(githubReleaseWorkflow).toContain("verify-recovered-provenance");
+  });
+
+  test("installs the exact attestation-capable npm through the Socket Firewall", () => {
+    for (const workflow of [githubReleaseWorkflow, protectedReleaseWorkflow]) {
+      expect(workflow).toContain("Install provenance-capable npm");
+      expect(workflow).toContain("npm@11.12.1");
+      expect(workflow).toContain(
+        "--registry=https://openai.firewall.socket.dev/npm/",
+      );
+      expect(workflow).toContain('>> "$GITHUB_PATH"');
+      expect(workflow).not.toContain("npm install --global");
+    }
   });
 
   test("serializes label reconciliation and reads the current PR title", () => {
@@ -1299,6 +1536,61 @@ describe("GitHub release workflow safeguards", () => {
     expect(releaseLabelsWorkflow).toContain(
       '"repos/$GITHUB_REPOSITORY/labels/skip-release-notes"',
     );
+  });
+
+  test.each([
+    { title: "feat!: breaking feature", label: "enhancement" },
+    { title: "feat(api)!: breaking feature", label: "enhancement" },
+    { title: "fix!: breaking fix", label: "bug" },
+    { title: "fix(api)!: breaking fix", label: "bug" },
+    { title: "docs!: breaking documentation", label: "documentation" },
+    {
+      title: "docs(api)!: breaking documentation",
+      label: "documentation",
+    },
+  ])("categorizes breaking-change title $title", ({ title, label }) => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const mock = [
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      "  local method=GET",
+      '  if [[ "${1:-}" == "--method" ]]; then',
+      '    method="$2"',
+      "    shift 2",
+      "  fi",
+      '  local endpoint="$1"',
+      "  shift",
+      '  case "$method $endpoint" in',
+      '    "GET repos/test/codex-security/issues/17")',
+      "      printf '%s\\n' \"$MOCK_PR_TITLE\"",
+      "      ;;",
+      '    "GET repos/test/codex-security/issues/17/labels")',
+      "      return 0",
+      "      ;;",
+      '    "POST repos/test/codex-security/issues/17/labels")',
+      "      printf '%s\\n' \"$@\"",
+      "      ;;",
+      "    *) return 65 ;;",
+      "  esac",
+      "}",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        MOCK_PR_TITLE: title,
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`labels[]=${label}`);
   });
 
   test("executes and recovers from concurrent skip-label creation", () => {

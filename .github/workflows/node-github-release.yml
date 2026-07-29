@@ -48,6 +48,25 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      - name: Install provenance-capable npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_tools="$RUNNER_TEMP/codex-security-provenance-npm"
+          npm install \
+            --prefix "$npm_tools" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            --registry=https://openai.firewall.socket.dev/npm/ \
+            npm@11.12.1
+
+          if [[ "$("$npm_tools/node_modules/.bin/npm" --version)" != "11.12.1" ]]; then
+            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
+            exit 1
+          fi
+          printf '%s\n' "$npm_tools/node_modules/.bin" >> "$GITHUB_PATH"
+
       - name: Verify bundled provenance-capable npm
         shell: bash
         run: |
@@ -163,7 +182,6 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
-          RELEASE_RUN_ID: ${{ steps.release.outputs.run-id }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -202,12 +220,11 @@ jobs:
             --json \
             --include-attestations |
             node sdk/typescript/scripts/release-automation.mjs \
-              verify-provenance \
+              verify-recovered-provenance \
               "$archive" \
               "$RELEASE_VERSION" \
               "$RELEASE_SHA" \
-              "$GITHUB_REPOSITORY" \
-              "$RELEASE_RUN_ID"
+              "$GITHUB_REPOSITORY"
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
 
@@ -290,9 +307,24 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
               2>/dev/null
           )"; then
+            asset_name="$(basename "$RELEASE_ARCHIVE")"
+            downloaded_assets="$(mktemp -d)"
+            trap 'rm -rf "$downloaded_assets"' EXIT
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset_name" \
+              --dir "$downloaded_assets"
+
+            downloaded_archive="$downloaded_assets/$asset_name"
+            if [[ ! -f "$downloaded_archive" || -L "$downloaded_archive" ]]; then
+              echo "Expected the exact existing GitHub release asset." >&2
+              exit 1
+            fi
+
             printf '%s\n' "$existing_release" |
               node sdk/typescript/scripts/release-automation.mjs \
-                verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG"
+                verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG" \
+                "$downloaded_archive"
             echo "The verified GitHub Release already exists."
             exit 0
           fi

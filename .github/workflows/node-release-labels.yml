@@ -33,16 +33,16 @@ jobs:
 
           release_note_label() {
             case "$1" in
-              feat:* | feat\(*\):*)
+              feat:* | feat\(*\):* | feat!:* | feat\(*\)!:*)
                 printf '%s\n' enhancement
                 ;;
-              fix:* | fix\(*\):*)
+              fix:* | fix\(*\):* | fix!:* | fix\(*\)!:*)
                 printf '%s\n' bug
                 ;;
-              docs:* | docs\(*\):*)
+              docs:* | docs\(*\):* | docs!:* | docs\(*\)!:*)
                 printf '%s\n' documentation
                 ;;
-              release:* | release\(*\):* | test:* | test\(*\):*)
+              release:* | release\(*\):* | release!:* | release\(*\)!:* | test:* | test\(*\):* | test!:* | test\(*\)!:*)
                 printf '%s\n' skip-release-notes
                 ;;
               *)
