@@ -1,8 +1,10 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code. Scan repositories, review changes, track findings over time, and run security checks in CI.
+`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
 
-**[Documentation](http://learn.chatgpt.com/docs/security/cli)**
+**See the [Codex Security Documentation](http://learn.chatgpt.com/docs/security/cli)** for more details.
+
+> Note: for best results, we recommend that your account is verified for [Trusted Access](https://chatgpt.com/cyber).
 
 ## Quick start
 
@@ -10,11 +12,12 @@ Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security
 
 ```bash
 npm install @openai/codex-security
-npx codex-security login
-npx codex-security scan .
-npx codex-security scan . --verbose
-CODEX_SECURITY_LOG_LEVEL=debug npx codex-security scan .
-LOG_LEVEL=debug npx codex-security scan .
+npx @openai/codex-security login
+npx @openai/codex-security scan .
+npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
+npx @openai/codex-security scan . --verbose
+CODEX_SECURITY_LOG_LEVEL=debug npx @openai/codex-security scan .
+LOG_LEVEL=debug npx @openai/codex-security scan .
 ```
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
@@ -24,8 +27,8 @@ which credential to use. CI and other noninteractive scans keep the existing
 API-key precedence. Select a credential explicitly when needed:
 
 ```bash
-npx codex-security scan . --auth chatgpt
-npx codex-security scan . --auth api-key
+npx @openai/codex-security scan . --auth chatgpt
+npx @openai/codex-security scan . --auth api-key
 ```
 
 To make your ChatGPT sign-in the automatic default, unset any configured API

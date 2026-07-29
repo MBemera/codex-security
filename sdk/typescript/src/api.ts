@@ -133,6 +133,7 @@ export interface ScanOptions {
     details?: ScanReconnectDetails,
   ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
 }
@@ -162,7 +163,8 @@ type ScanObserverName =
   | "onOutputDirReady"
   | "onScanStarted"
   | "onReconnect"
-  | "onWorkerStatus";
+  | "onWorkerStatus"
+  | "onWarning";
 
 export interface ScanPreflight {
   repository: string;
@@ -297,9 +299,11 @@ export class CodexSecurity {
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
     let scanDir = "";
+    let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
+    let completionCost: ScanCost | null = null;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -445,13 +449,15 @@ export class CodexSecurity {
         scanOutputRoot,
         (path) => requireOutputOutsideRepository(protectedRoot, path),
         options.archiveExisting,
-        (archiveDir) =>
+        (archiveDir) => {
+          archivedScanDir = archiveDir;
           notifyObserver(
             "onOutputArchived",
             options.onOutputArchived,
             options.onObserverError,
             archiveDir,
-          ),
+          );
+        },
       );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
@@ -552,21 +558,60 @@ export class CodexSecurity {
         scanDir,
         "--recipe-json",
         JSON.stringify(recipe),
+        ...(options.archiveExisting === true ? ["--archive-existing"] : []),
+        ...(archivedScanDir === null
+          ? []
+          : ["--archived-scan-dir", archivedScanDir]),
         ...(options.parentScanId === undefined
           ? []
           : ["--parent-scan-id", options.parentScanId]),
       ]);
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
+      const contract = registration["contract"];
+      const contractTarget = isRecord(contract)
+        ? contract["target"]
+        : undefined;
+      const allowedKinds = isRecord(contractTarget)
+        ? contractTarget["allowedKinds"]
+        : undefined;
+      const targetKind =
+        Array.isArray(allowedKinds) && allowedKinds.length === 1
+          ? allowedKinds[0]
+          : undefined;
+      const diffTarget = isRecord(contract)
+        ? contract["diffTarget"]
+        : undefined;
+      const snapshotDigest =
+        targetKind === "git_diff" && isRecord(diffTarget)
+          ? diffTarget["contentDigest"]
+          : isRecord(contractTarget)
+            ? contractTarget["requiredSnapshotDigest"]
+            : undefined;
+      const registeredRevision = registration["targetRevision"];
       if (
         typeof scanId !== "string" ||
         typeof targetId !== "string" ||
-        registration["scanDir"] !== scanDir
+        registration["scanDir"] !== scanDir ||
+        typeof targetKind !== "string" ||
+        ![
+          "git_revision",
+          "git_worktree",
+          "git_diff",
+          "directory_snapshot",
+        ].includes(targetKind) ||
+        (snapshotDigest !== undefined && typeof snapshotDigest !== "string") ||
+        ((targetKind === "git_worktree" ||
+          targetKind === "directory_snapshot") &&
+          typeof snapshotDigest !== "string") ||
+        typeof registeredRevision !== "string"
       ) {
         throw new CodexSecurityError(
           "The Codex Security workbench returned an invalid scan registration.",
         );
       }
+      const targetRevision =
+        registeredRevision === "unversioned" ? null : registeredRevision;
       activeScan = { id: scanId, options: workbenchOptions };
       checkOpen();
       const feedback = await workbench(
@@ -633,6 +678,13 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
+        CODEX_SECURITY_TARGET_KIND: targetKind,
+        ...(targetRevision === null
+          ? {}
+          : { CODEX_SECURITY_TARGET_REVISION: targetRevision }),
+        ...(typeof snapshotDigest === "string"
+          ? { CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: snapshotDigest }
+          : {}),
         ...(knowledgeBase === null
           ? {}
           : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
@@ -694,24 +746,26 @@ export class CodexSecurity {
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
+        workbenchValidated: true,
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
-            throw new CodexSecurityError(
-              "Cannot evaluate the cost limit: model pricing or token usage is unavailable.",
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
             );
           }
-          const cost = snapshot.cost;
+          completionCost = snapshot.cost;
           await workbench(workbenchOptions, [
-            "complete-scan",
+            "prepare-scan-completion",
             "--scan-id",
             scanId,
-            ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
           ]);
-          activeScan = null;
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
@@ -720,6 +774,28 @@ export class CodexSecurity {
         onObserverError: options.onObserverError,
       });
       checkOpen();
+      const completion = await workbench(workbenchOptions, [
+        "complete-scan",
+        "--scan-id",
+        scanId,
+        ...(completionCost === null
+          ? []
+          : ["--cost-json", JSON.stringify(completionCost)]),
+      ]);
+      activeScan = null;
+      const completedScan = completion["scan"];
+      if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
+        for (const warning of completedScan["warnings"]) {
+          if (typeof warning === "string") {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              warning,
+            );
+          }
+        }
+      }
       return result;
     } catch (error) {
       const snapshot = await costTracker?.stop().catch(() => null);
@@ -1126,6 +1202,7 @@ interface ScanEventRunOptions {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
+  workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => void;
@@ -1245,6 +1322,7 @@ export async function runScanEvents(
       options.pluginRoot,
       options.expectation,
       options.signal,
+      options.workbenchValidated,
     );
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
@@ -1298,6 +1376,9 @@ async function scanPrompt(
     'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
+    'Use exactly "$CODEX_SECURITY_TARGET_KIND" as scan.target.kind; do not infer the target kind from the checkout.',
+    'When "$CODEX_SECURITY_TARGET_REVISION" is set, use its exact value as scan.target.revision.',
+    'When "$CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST" is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.',
     'Use exactly "codex-security-plugin" as scan.producer.name.',
     ...(hasConfigPath
       ? [
@@ -1388,6 +1469,7 @@ async function collectResult(
   pluginRoot: string,
   expectation: ScanExpectation,
   signal: AbortSignal,
+  workbenchValidated = false,
 ): Promise<ScanResult> {
   const required = [
     "scan-manifest.json",
@@ -1412,6 +1494,7 @@ async function collectResult(
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,
+    workbenchValidated,
     signal,
   });
   let sarifPath: string | null = null;
