@@ -1182,6 +1182,63 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test.each([
+    { kind: "lightweight", objectSha: releaseCommit },
+    {
+      kind: "annotated",
+      objectSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
+  ])(
+    "resolves the exact $kind tag when a same-named branch exists",
+    ({ objectSha }) => {
+      const script = workflowStepShell(
+        githubReleaseWorkflow,
+        "Resolve the successful protected release",
+      );
+      const branchCommit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      const mocks = [
+        "git() {",
+        `  if [[ "$1" != "rev-parse" || "$2" != "--verify" || "$3" != "${objectSha}^{commit}" ]]; then return 66; fi`,
+        `  printf '%s\\n' '${releaseCommit}'`,
+        "}",
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  case "$1" in',
+        '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
+        `      printf '%s\\n' '${objectSha}'`,
+        "      ;;",
+        '    "repos/openai/codex-security/commits/npm-v0.1.2")',
+        `      printf '%s\\n' '${branchCommit}'`,
+        "      ;;",
+        `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
+        `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
+        "      ;;",
+        "    *) return 65 ;;",
+        "  esac",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: "/dev/null",
+          GITHUB_REPOSITORY: "openai/codex-security",
+          INPUT_RUN_ID: releaseRun,
+          INPUT_TAG: "npm-v0.1.2",
+          TRIGGER_RUN_ID: "",
+          TRIGGER_TAG: "",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toContain(
+        "The release run must successfully publish the exact tagged commit.",
+      );
+    },
+  );
+
   test("explicitly prevents historical releases becoming latest", () => {
     expect(githubReleaseWorkflow).toContain("--generate-notes");
     expect(githubReleaseWorkflow).toContain('--latest="$MAKE_LATEST"');
