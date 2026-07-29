@@ -25,27 +25,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_PREVIOUS_TITLE: ${{ github.event.changes.title.from }}
         run: |
           set -euo pipefail
 
-          case "$PR_TITLE" in
-            feat:* | feat\(*\):*)
-              label="enhancement"
-              ;;
-            fix:* | fix\(*\):*)
-              label="bug"
-              ;;
-            docs:* | docs\(*\):*)
-              label="documentation"
-              ;;
-            release:* | release\(*\):* | test:* | test\(*\):*)
-              label="skip-release-notes"
-              ;;
-            *)
-              echo "No automatic release-note category applies."
-              exit 0
-              ;;
-          esac
+          release_note_label() {
+            case "$1" in
+              feat:* | feat\(*\):*)
+                printf '%s\n' enhancement
+                ;;
+              fix:* | fix\(*\):*)
+                printf '%s\n' bug
+                ;;
+              docs:* | docs\(*\):*)
+                printf '%s\n' documentation
+                ;;
+              release:* | release\(*\):* | test:* | test\(*\):*)
+                printf '%s\n' skip-release-notes
+                ;;
+            esac
+          }
+
+          label="$(release_note_label "$PR_TITLE")"
+          previous_label="$(release_note_label "$PR_PREVIOUS_TITLE")"
+
+          if [[ -n "$previous_label" && "$previous_label" != "$label" ]]; then
+            current_labels="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+                --jq '.[].name'
+            )"
+            while IFS= read -r current_label; do
+              if [[ "$current_label" == "$previous_label" ]]; then
+                gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$previous_label" \
+                  --silent
+                break
+              fi
+            done <<< "$current_labels"
+          fi
+
+          if [[ -z "$label" ]]; then
+            echo "No automatic release-note category applies."
+            exit 0
+          fi
 
           if [[ "$label" == "skip-release-notes" ]]; then
             if ! gh api \

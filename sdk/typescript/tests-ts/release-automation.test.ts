@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 
 type ReleaseMetadata = Record<string, unknown>;
@@ -33,6 +34,20 @@ const archive = Buffer.from("verified codex security release artifact");
 const integrity =
   "sha512-" + createHash("sha512").update(archive).digest("base64");
 const digest = "sha256:" + createHash("sha256").update(archive).digest("hex");
+const githubReleaseWorkflow = readFileSync(
+  new URL(
+    "../../../.github/workflows/node-github-release.yml",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const releaseLabelsWorkflow = readFileSync(
+  new URL(
+    "../../../.github/workflows/node-release-labels.yml",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 function publishedMetadata(): ReleaseMetadata {
   return {
@@ -219,5 +234,25 @@ describe("idempotent GitHub release verification", () => {
     ).toThrow(
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
+  });
+});
+
+describe("GitHub release workflow safeguards", () => {
+  test("does not force a historical backfill to become the latest release", () => {
+    expect(githubReleaseWorkflow).toContain("--generate-notes");
+    expect(githubReleaseWorkflow).not.toMatch(/^\s*--latest(?:=true)?\s*$/mu);
+  });
+
+  test("reconciles the previous category after a pull request title changes", () => {
+    expect(releaseLabelsWorkflow).toContain(
+      "PR_PREVIOUS_TITLE: ${{ github.event.changes.title.from }}",
+    );
+    expect(releaseLabelsWorkflow).toContain(
+      'previous_label="$(release_note_label "$PR_PREVIOUS_TITLE")"',
+    );
+    expect(releaseLabelsWorkflow).toContain(
+      'if [[ -n "$previous_label" && "$previous_label" != "$label" ]]; then',
+    );
+    expect(releaseLabelsWorkflow).toContain("gh api --method DELETE");
   });
 });

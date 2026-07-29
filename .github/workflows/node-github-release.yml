@@ -198,7 +198,6 @@ jobs:
             --title "Codex Security $RELEASE_VERSION"
             --verify-tag
             --generate-notes
-            --latest
           )
           if [[ -n "$previous_tag" ]]; then
             release_args+=(--notes-start-tag "$previous_tag")
