@@ -889,7 +889,7 @@ export async function main(
             .boolean()
             .default(false)
             .describe(
-              "Print redacted scan lifecycle diagnostics to stderr; CODEX_SECURITY_LOG_LEVEL=debug also enables this.",
+              "Print redacted scan lifecycle diagnostics to stderr; CODEX_SECURITY_LOG_LEVEL=debug (or LOG_LEVEL=debug as a fallback) also enables this.",
             ),
           path: z
             .array(optionValue("--path"))
@@ -2309,12 +2309,21 @@ async function runScan(
   const verbose =
     arguments_.verbose === true ||
     configuredLogLevel?.toLowerCase() === "debug";
+  const writeAboveProgress = (write: () => void): void => {
+    if (progress === null) {
+      write();
+      return;
+    }
+    progress.writeAboveTimer(write);
+  };
   const diagnostic = (
     event: string,
     fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
   ): void => {
     if (verbose) {
-      writeVerboseDiagnostic(errorOutput, event, fields);
+      writeAboveProgress(() =>
+        writeVerboseDiagnostic(errorOutput, event, fields),
+      );
     }
   };
   const preparationAbortController = new AbortController();
@@ -2375,6 +2384,9 @@ async function runScan(
           arguments_.effort,
         ),
     };
+    const configuredModel = config.codexOverrides?.["model"];
+    const configuredReasoningEffort =
+      config.codexOverrides?.["model_reasoning_effort"];
     let auth = arguments_.auth;
     selectedAuthentication = scanAuthentication(dependencies.environment, auth);
     if (
@@ -2428,8 +2440,14 @@ async function runScan(
               : "repository",
       requested_auth: auth ?? "auto",
       dry_run: arguments_.dryRun,
-      model: arguments_.model,
-      reasoning_effort: arguments_.effort,
+      model:
+        typeof configuredModel === "string"
+          ? configuredModel
+          : arguments_.model,
+      reasoning_effort:
+        typeof configuredReasoningEffort === "string"
+          ? configuredReasoningEffort
+          : arguments_.effort,
     });
     progress = new Progress(errorOutput, dependencies, interactive);
     const scope = scanScope(arguments_);
@@ -2460,6 +2478,7 @@ async function runScan(
           estimated_usd: cost.estimatedUsd,
           input_tokens: cost.inputTokens,
           cached_input_tokens: cost.cachedInputTokens,
+          cache_write_input_tokens: cost.cacheWriteInputTokens,
           output_tokens: cost.outputTokens,
           max_cost_usd: arguments_.maxCostUsd,
         });
@@ -2565,19 +2584,23 @@ async function runScan(
         progress.startTimer(runningMessage());
       },
       onWarning: (warning) => {
-        diagnostic("scan.warning", { message: cliErrorMessage(warning) });
-        errorOutput.write(
-          `codex-security: warning: ${cliErrorMessage(warning)}\n`,
-        );
+        writeAboveProgress(() => {
+          diagnostic("scan.warning", { message: cliErrorMessage(warning) });
+          errorOutput.write(
+            `codex-security: warning: ${cliErrorMessage(warning)}\n`,
+          );
+        });
       },
       onObserverError: (observer, error) => {
-        diagnostic("scan.observer_failed", {
-          observer,
-          message: cliErrorMessage(error),
+        writeAboveProgress(() => {
+          diagnostic("scan.observer_failed", {
+            observer,
+            message: cliErrorMessage(error),
+          });
+          errorOutput.write(
+            `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
+          );
         });
-        errorOutput.write(
-          `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
-        );
       },
     };
     if (arguments_.dryRun) {
@@ -3015,6 +3038,7 @@ export class Progress {
   readonly #startedAt: number;
   readonly #interactive: boolean;
   #timer: NodeJS.Timeout | null = null;
+  #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
 
@@ -3059,6 +3083,7 @@ export class Progress {
       () => this.#renderTimer(message),
       PROGRESS_REFRESH_MILLISECONDS,
     );
+    this.#timerMessage = message;
   }
 
   public stopTimer(): void {
@@ -3066,6 +3091,7 @@ export class Progress {
       this.#dependencies.clearInterval(this.#timer);
       this.#timer = null;
     }
+    this.#timerMessage = null;
     if (this.#timerLineActive) {
       this.#stream.write("\n");
       this.#timerLineActive = false;
@@ -3073,6 +3099,20 @@ export class Progress {
     if (this.#cursorHidden) {
       this.#stream.write(SHOW_CURSOR);
       this.#cursorHidden = false;
+    }
+  }
+
+  public writeAboveTimer(write: () => void): void {
+    const message = this.#timerMessage;
+    if (message === null) {
+      write();
+      return;
+    }
+    this.stopTimer();
+    try {
+      write();
+    } finally {
+      this.startTimer(message);
     }
   }
 

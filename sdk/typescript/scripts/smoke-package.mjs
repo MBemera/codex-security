@@ -282,6 +282,8 @@ try {
   const scanHelp = runInstalledCli("scan", "--help");
   assert.match(scanHelp, /--verbose\b/u);
   assert.match(scanHelp, /CODEX_SECURITY_LOG_LEVEL=debug/u);
+  assert.match(scanHelp, /\bLOG_LEVEL=debug\b/u);
+  assert.match(scanHelp, /as a fallback/u);
 
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, and ${expectedPluginFiles.length} bundled plugin files.`,

@@ -1055,6 +1055,84 @@ describe("CLI", () => {
     expect(timers).toBe(0);
   });
 
+  test("keeps verbose diagnostics separate from interactive progress", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const result = fakeResult([], "complete", {
+      input_tokens: 200,
+      cache_write_input_tokens: 100,
+      output_tokens: 0,
+    });
+    const activeTimers = new Set<NodeJS.Timeout>();
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_TTY_SECRET_123" },
+    });
+    deps.setInterval = () => {
+      const timer = {} as NodeJS.Timeout;
+      activeTimers.add(timer);
+      return timer;
+    };
+    deps.clearInterval = (timer) => {
+      activeTimers.delete(timer);
+    };
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        expect(activeTimers.size).toBe(1);
+        options?.onAuthentication?.({
+          method: "api_key",
+          source: "OPENAI_API_KEY",
+          verified: false,
+        });
+        expect(activeTimers.size).toBe(1);
+        options?.onOutputDirReady?.("/tmp/scan");
+        expect(activeTimers.size).toBe(1);
+        options?.onCost?.(result.cost!);
+        expect(activeTimers.size).toBe(1);
+        options?.onWarning?.("Recoverable scanner warning");
+        expect(activeTimers.size).toBe(1);
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error("Observer temporarily unavailable"),
+        );
+        expect(activeTimers.size).toBe(1);
+        options?.onScanStarted?.();
+        expect(activeTimers.size).toBe(1);
+        return result;
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    const output = stripVTControlCharacters(stderr.text());
+    const diagnosticLines = output
+      .split(/[\r\n]+/u)
+      .filter(
+        (line) =>
+          line.includes("codex-security: debug:") ||
+          line.includes("codex-security: warning:"),
+      );
+    expect(diagnosticLines.length).toBeGreaterThan(3);
+    for (const line of diagnosticLines) {
+      expect(
+        line.startsWith("codex-security: debug:") ||
+          line.startsWith("codex-security: warning:"),
+      ).toBe(true);
+    }
+    expect(output).not.toMatch(
+      /\[[0-9:]+\][^\r\n]*codex-security: (?:debug|warning):/u,
+    );
+    expect(output).not.toContain("SYNTHETIC_TTY_SECRET");
+    expect(activeTimers.size).toBe(0);
+  });
+
   test("keeps structured scans noninteractive even when stderr is a terminal", async () => {
     for (const options of [
       ["--json"],
@@ -1273,6 +1351,10 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(help.text()).toContain("Usage: codex-security scan [repository]");
+    expect(help.text()).toContain("--verbose");
+    expect(help.text()).toContain("CODEX_SECURITY_LOG_LEVEL=debug");
+    expect(help.text()).toMatch(/\bLOG_LEVEL=debug\b/u);
+    expect(help.text()).toContain("as a fallback");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--model <string>");
@@ -1800,6 +1882,61 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "codex-security: debug: scan.configuration",
     );
+    expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reports reasoning effort supplied through legacy --codex overrides", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--codex",
+          'model_reasoning_effort="high"',
+          "--verbose",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reports saved model and reasoning effort for verbose scan reruns", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                model: "gpt-original",
+                model_reasoning_effort: "high",
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain('model="gpt-original"');
     expect(stderr.text()).toContain('reasoning_effort="high"');
   });
 
@@ -2522,6 +2659,30 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain("Estimated cost: $0.00625 of $0.01 limit");
+  });
+
+  test("includes cache-write tokens in verbose cost diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult([], "complete", {
+      input_tokens: 200,
+      cache_write_input_tokens: 200,
+      output_tokens: 0,
+    });
+
+    expect(result.cost?.cacheWriteInputTokens).toBe(200);
+    expect(result.cost?.estimatedUsd).toBeGreaterThan(0);
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result, costUpdates: [result.cost!] }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain("codex-security: debug: cost.updated");
+    expect(stderr.text()).toContain("cache_write_input_tokens=200");
   });
 
   test("reports a scan stopped when its live cost exceeds the limit", async () => {
