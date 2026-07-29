@@ -13,6 +13,8 @@ npm install @openai/codex-security
 npx codex-security login
 npx codex-security scan .
 npx codex-security scan . --verbose
+CODEX_SECURITY_LOG_LEVEL=debug npx codex-security scan .
+LOG_LEVEL=debug npx codex-security scan .
 ```
 
 For CI, set `OPENAI_API_KEY` instead of signing in.

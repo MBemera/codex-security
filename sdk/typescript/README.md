@@ -132,6 +132,8 @@ npx codex-security scan /path/to/repository --diff origin/main --json
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --verbose
+CODEX_SECURITY_LOG_LEVEL=debug npx codex-security scan /path/to/repository
+LOG_LEVEL=debug npx codex-security scan /path/to/repository
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
 npx codex-security scan /path/to/repository --max-cost 5
@@ -200,14 +202,17 @@ token and worker counts, estimated cost, the results directory, and the next
 useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
 
-Add `--verbose` to print redacted lifecycle diagnostics to stderr. Verbose
-output includes CLI and runtime versions, the selected credential source,
-prepared scan output, worker phases and capacity, classified connection retries,
-cost updates, completion, and runtime cleanup. API keys, tokens, and raw
-provider messages are not printed. Use `--verbose --json` in CI to capture
-diagnostics without changing the JSON scan result on stdout, or
-`--verbose --dry-run` to inspect unverified local scan configuration without
-starting Codex.
+Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
+lifecycle diagnostics to stderr. Promptfoo-compatible `LOG_LEVEL=debug` also
+enables verbose output. If both environment variables are set,
+`CODEX_SECURITY_LOG_LEVEL` takes precedence; `--verbose` always enables verbose
+output. Diagnostics include CLI and runtime versions, the selected credential
+source, prepared scan output, worker phases and capacity, classified connection
+retries, cost updates, completion, and runtime cleanup. API keys, tokens, and raw
+provider messages are not printed. Use `--verbose --json` or
+`CODEX_SECURITY_LOG_LEVEL=debug` with `--json` in CI to capture diagnostics
+without changing the JSON scan result on stdout, or `--verbose --dry-run` to
+inspect unverified local scan configuration without starting Codex.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use

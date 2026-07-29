@@ -1686,6 +1686,97 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
   });
 
+  test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+  });
+
+  test("accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LOG_LEVEL: "  ",
+            LOG_LEVEL: "  DEBUG  ",
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+  });
+
+  test("prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LOG_LEVEL: "info",
+            LOG_LEVEL: "debug",
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).not.toContain("codex-security: debug:");
+  });
+
+  test("lets --verbose override non-debug environment log levels", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LOG_LEVEL: "error",
+            LOG_LEVEL: "warn",
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+  });
+
   test("does not emit verbose diagnostics unless explicitly requested", async () => {
     const stdout = capture();
     const stderr = capture();

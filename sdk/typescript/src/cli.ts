@@ -865,7 +865,9 @@ export async function main(
           verbose: z
             .boolean()
             .default(false)
-            .describe("Print redacted scan lifecycle diagnostics to stderr."),
+            .describe(
+              "Print redacted scan lifecycle diagnostics to stderr; CODEX_SECURITY_LOG_LEVEL=debug also enables this.",
+            ),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -2222,11 +2224,17 @@ async function runScan(
   let lastWorkerUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
   let phase: string | null = null;
+  const configuredLogLevel =
+    dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
+    dependencies.environment["LOG_LEVEL"]?.trim();
+  const verbose =
+    arguments_.verbose === true ||
+    configuredLogLevel?.toLowerCase() === "debug";
   const diagnostic = (
     event: string,
     fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
   ): void => {
-    if (arguments_.verbose === true) {
+    if (verbose) {
       writeVerboseDiagnostic(errorOutput, event, fields);
     }
   };
