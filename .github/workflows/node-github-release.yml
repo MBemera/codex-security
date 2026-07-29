@@ -77,6 +77,13 @@ jobs:
             exit 1
           fi
 
+          if ! gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" \
+            --silent >/dev/null 2>&1; then
+            echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2
+            exit 1
+          fi
+
           release_sha="$(
             gh api "repos/$GITHUB_REPOSITORY/commits/$release_tag" \
               --jq '.sha'

@@ -90,6 +90,12 @@ jobs:
             echo "npm release tags must point to a commit on main." >&2
             exit 1
           fi
+          published_versions="$(
+            sfw npm view @openai/codex-security versions --json
+          )"
+          printf '%s\n' "$published_versions" |
+            node sdk/typescript/scripts/release-automation.mjs \
+              require-published-increase "$version" >/dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies

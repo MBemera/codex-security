@@ -1073,6 +1073,42 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test("enforces increasing versions inside the protected npm publisher", () => {
+    expect(protectedReleaseWorkflow).toContain(
+      "sfw npm view @openai/codex-security versions",
+    );
+    expect(protectedReleaseWorkflow).toContain("require-published-increase");
+  });
+
+  test("rejects manually publishing a tag older than npm latest", () => {
+    const script = workflowStepShell(
+      protectedReleaseWorkflow,
+      "Validate release tag",
+    );
+    const mocks = [
+      "git() { return 0; }",
+      "sfw() { printf '%s\\n' '[\"0.1.1\",\"2.0.0\"]'; }",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REF: "refs/tags/npm-v0.1.2",
+        GITHUB_REF_NAME: "npm-v0.1.2",
+        GITHUB_REF_TYPE: "tag",
+        GITHUB_SHA: releaseCommit,
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Release version must be greater than every published stable version.",
+    );
+  });
+
   test("durably queues every release-cut and protected publishing run", () => {
     expect(releaseCutWorkflow).toMatch(
       /concurrency:\s*\n\s+group: node-release-cut\s*\n\s+queue: max/u,
@@ -1088,6 +1124,55 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(githubReleaseWorkflow).not.toContain(
       "group: node-github-release-${{",
+    );
+  });
+
+  test("requires an actual Git tag for GitHub releases", () => {
+    expect(githubReleaseWorkflow).toContain(
+      '"repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag"',
+    );
+  });
+
+  test("rejects a release-shaped branch before resolving its commit", () => {
+    const script = workflowStepShell(
+      githubReleaseWorkflow,
+      "Resolve the successful protected release",
+    );
+    const mock = [
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      '  case "$1" in',
+      '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
+      "      return 1",
+      "      ;;",
+      '    "repos/openai/codex-security/commits/npm-v0.1.2")',
+      `      printf '%s\\n' '${releaseCommit}'`,
+      "      ;;",
+      `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
+      `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
+      "      ;;",
+      "    *) return 65 ;;",
+      "  esac",
+      "}",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REPOSITORY: "openai/codex-security",
+        INPUT_RUN_ID: releaseRun,
+        INPUT_TAG: "npm-v0.1.2",
+        TRIGGER_RUN_ID: "",
+        TRIGGER_TAG: "",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "GitHub releases require an existing stable npm-vX.Y.Z tag.",
     );
   });
 
