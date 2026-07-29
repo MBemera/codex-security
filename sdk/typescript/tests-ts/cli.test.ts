@@ -1866,6 +1866,34 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
   });
 
+  test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    const configuration = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.configuration"),
+      );
+    expect(configuration).toBeDefined();
+    expect(configuration).toContain(
+      `model=${JSON.stringify(DEFAULT_SCAN_MODEL_CONFIGURATION.model)}`,
+    );
+    expect(configuration).toContain(
+      `reasoning_effort=${JSON.stringify(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort)}`,
+    );
+  });
+
   test("includes selected reasoning effort in verbose scan diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();

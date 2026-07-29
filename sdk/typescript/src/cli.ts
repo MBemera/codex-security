@@ -2387,6 +2387,14 @@ async function runScan(
     const configuredModel = config.codexOverrides?.["model"];
     const configuredReasoningEffort =
       config.codexOverrides?.["model_reasoning_effort"];
+    const effectiveModel =
+      typeof configuredModel === "string"
+        ? configuredModel
+        : arguments_.model ?? DEFAULT_SCAN_MODEL_CONFIGURATION.model;
+    const effectiveReasoningEffort =
+      typeof configuredReasoningEffort === "string"
+        ? configuredReasoningEffort
+        : arguments_.effort ?? DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
     let auth = arguments_.auth;
     selectedAuthentication = scanAuthentication(dependencies.environment, auth);
     if (
@@ -2440,14 +2448,8 @@ async function runScan(
               : "repository",
       requested_auth: auth ?? "auto",
       dry_run: arguments_.dryRun,
-      model:
-        typeof configuredModel === "string"
-          ? configuredModel
-          : arguments_.model,
-      reasoning_effort:
-        typeof configuredReasoningEffort === "string"
-          ? configuredReasoningEffort
-          : arguments_.effort,
+      model: effectiveModel,
+      reasoning_effort: effectiveReasoningEffort,
     });
     progress = new Progress(errorOutput, dependencies, interactive);
     const scope = scanScope(arguments_);
