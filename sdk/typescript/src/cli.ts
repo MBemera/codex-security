@@ -161,6 +161,7 @@ function optionValue(flag: string) {
 
 interface ScanArguments {
   auth?: ScanAuthMode;
+  verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
@@ -861,6 +862,10 @@ export async function main(
             .enum(["auto", "chatgpt", "api-key"])
             .default("auto")
             .describe("Select automatic, ChatGPT, or API-key authentication."),
+          verbose: z
+            .boolean()
+            .default(false)
+            .describe("Print redacted scan lifecycle diagnostics to stderr."),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -966,6 +971,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            verbose: options.verbose,
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
@@ -2183,6 +2189,26 @@ async function runExport(
   }
 }
 
+type VerboseDiagnosticValue = string | number | boolean | null | undefined;
+
+function writeVerboseDiagnostic(
+  output: Writable,
+  event: string,
+  fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
+): void {
+  const attributes = Object.entries(fields).flatMap(([name, value]) => {
+    if (value === undefined) return [];
+    const safe =
+      typeof value === "string"
+        ? cliErrorMessage(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ")
+        : value;
+    return [`${name}=${JSON.stringify(safe)}`];
+  });
+  output.write(
+    `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
+  );
+}
+
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
@@ -2196,6 +2222,14 @@ async function runScan(
   let lastWorkerUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
   let phase: string | null = null;
+  const diagnostic = (
+    event: string,
+    fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
+  ): void => {
+    if (arguments_.verbose === true) {
+      writeVerboseDiagnostic(errorOutput, event, fields);
+    }
+  };
   const preparationAbortController = new AbortController();
   const signalListener = (signal: SignalName) => () => {
     if (requestedSignal !== null) {
@@ -2287,6 +2321,24 @@ async function runScan(
         );
       }
     }
+    diagnostic("scan.configuration", {
+      cli_version: VERSION,
+      bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
+      codex_version: CODEX_EXECUTABLE_VERSION,
+      codex_sdk_version: CODEX_SDK_VERSION,
+      mode: arguments_.mode,
+      target:
+        arguments_.paths.length > 0
+          ? "paths"
+          : arguments_.diff !== undefined
+            ? "diff"
+            : arguments_.workingTree
+              ? "working_tree"
+              : "repository",
+      requested_auth: auth ?? "auto",
+      dry_run: arguments_.dryRun,
+      model: arguments_.model,
+    });
     progress = new Progress(errorOutput, dependencies, interactive);
     const scope = scanScope(arguments_);
     const runningMessage = (): string =>
@@ -2311,6 +2363,14 @@ async function runScan(
       failureSeverity: arguments_.failOnSeverity,
       maxCostUsd: arguments_.maxCostUsd,
       onCost: (cost) => {
+        diagnostic("cost.updated", {
+          model: cost.model,
+          estimated_usd: cost.estimatedUsd,
+          input_tokens: cost.inputTokens,
+          cached_input_tokens: cost.cachedInputTokens,
+          output_tokens: cost.outputTokens,
+          max_cost_usd: arguments_.maxCostUsd,
+        });
         if (arguments_.maxCostUsd === undefined) return;
         progress?.stopTimer();
         progress?.stage(
@@ -2321,6 +2381,7 @@ async function runScan(
         }
       },
       onOutputArchived: (archiveDir) => {
+        diagnostic("scan.output_archived", { archive_dir: archiveDir });
         progress?.stopTimer();
         errorOutput.write(
           `Moved existing results to: ${cliErrorMessage(archiveDir)}\n`,
@@ -2329,9 +2390,19 @@ async function runScan(
       signal: preparationAbortController.signal,
       onOutputDirReady: (path) => {
         scanDir = path;
+        diagnostic("scan.output_ready", { scan_dir: path });
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        diagnostic("authentication.selected", {
+          requested: auth ?? "auto",
+          method: authentication.method,
+          source:
+            authentication.method === "api_key"
+              ? authentication.source
+              : undefined,
+          verified: authentication.verified,
+        });
         progress?.stopTimer();
         if (authentication.method === "api_key") {
           progress?.stage(
@@ -2346,10 +2417,17 @@ async function runScan(
         progress?.startTimer("Preparing scan");
       },
       onScanStarted: () => {
+        diagnostic("scan.started");
         progress?.stopTimer();
         progress?.startTimer(runningMessage());
       },
       onReconnect: (attempt, maxAttempts, details) => {
+        diagnostic("connection.retry", {
+          reason: details?.reason ?? "unknown",
+          attempt,
+          max_attempts: maxAttempts,
+          retry_after_seconds: details?.retryAfterSeconds,
+        });
         progress?.stopTimer();
         const message =
           details?.reason === "rate_limit"
@@ -2375,6 +2453,18 @@ async function runScan(
             : `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
+        if (status.kind === "preflight") {
+          diagnostic("worker.preflight", {
+            delegation: status.delegation,
+            configured_slots: status.configuredSlots,
+          });
+        } else {
+          diagnostic("worker.phase", {
+            phase: status.phase,
+            planned: status.planned,
+            started: status.started,
+          });
+        }
         if (status.kind === "dispatch") {
           workerCapacity = { planned: status.planned, started: status.started };
           phase = scanPhase(status.phase);
@@ -2386,6 +2476,10 @@ async function runScan(
         progress.startTimer(runningMessage());
       },
       onObserverError: (observer, error) => {
+        diagnostic("scan.observer_failed", {
+          observer,
+          message: cliErrorMessage(error),
+        });
         errorOutput.write(
           `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
         );
@@ -2403,16 +2497,29 @@ async function runScan(
     failure = error;
   } finally {
     progress?.stopTimer();
-    await security?.close().catch((error: unknown) => {
-      if (!failed) {
-        failed = true;
-        failure = error;
-      }
-    });
+    if (security !== null) {
+      diagnostic("runtime.cleanup.started");
+      await security.close().then(
+        () => diagnostic("runtime.cleanup.completed"),
+        (error: unknown) => {
+          diagnostic("runtime.cleanup.failed", {
+            message: cliErrorMessage(error),
+          });
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        },
+      );
+    }
     removeSignalListeners();
   }
 
   if (requestedSignal !== null) {
+    diagnostic("scan.interrupted", {
+      signal: requestedSignal,
+      partial_output: scanDir !== null,
+    });
     return {
       exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
       error:
@@ -2426,6 +2533,11 @@ async function runScan(
       failure instanceof OutputInsideProtectedRootError
         ? cliErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
+    diagnostic("scan.failed", {
+      classification: classifyConnectionFailure(failure),
+      message,
+      partial_output: scanDir !== null,
+    });
     if (failure instanceof OutputInsideProtectedRootError) {
       errorOutput.write(`${message}\n`);
     } else {
@@ -2443,9 +2555,23 @@ async function runScan(
   }
   if (preflight !== null) {
     progress?.stage("Preflight complete");
+    diagnostic("scan.preflight.completed", {
+      model: preflight.model,
+      reasoning_effort: preflight.reasoningEffort,
+      method: preflight.authentication.method,
+      source:
+        preflight.authentication.method === "api_key"
+          ? preflight.authentication.source
+          : undefined,
+      verified: preflight.authentication.verified,
+    });
     return { exitCode: 0, data: { dryRun: true, ...preflight } };
   }
   if (result === null) {
+    diagnostic("scan.failed", {
+      classification: "unknown",
+      message: "Scan completed without a result.",
+    });
     errorOutput.write("codex-security: scan completed without a result\n");
     return { exitCode: 2, error: "Scan completed without a result." };
   }
@@ -2464,6 +2590,13 @@ async function runScan(
   const incomplete = result.coverage.completeness !== "complete";
   progress?.stage("Scan complete");
   printScanSummary(result, progress, errorOutput, workerCapacity);
+  diagnostic("scan.completed", {
+    coverage: result.coverage.completeness,
+    findings: result.findings.findings.length,
+    scan_id: result.manifest.scan.id,
+    estimated_usd: result.cost?.estimatedUsd,
+    exit_code: incomplete ? 2 : blockingCount > 0 ? 1 : 0,
+  });
   if (incomplete) {
     errorOutput.write(
       threshold === undefined

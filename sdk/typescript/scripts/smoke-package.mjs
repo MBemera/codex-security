@@ -260,17 +260,17 @@ try {
     "npm must create the published codex-security executable shim.",
   );
 
-  function runInstalledCli(argument) {
+  function runInstalledCli(...args) {
     const options = { cwd: consumer, capture: true };
     if (process.platform === "win32") {
       return run(
         process.env.ComSpec ?? "cmd.exe",
-        ["/d", "/s", "/c", `""${shim}" ${argument}"`],
+        ["/d", "/s", "/c", `""${shim}" ${args.join(" ")}"`],
         { ...options, windowsVerbatimArguments: true },
       );
     }
 
-    return run(shim, [argument], options);
+    return run(shim, args, options);
   }
 
   const version = runInstalledCli("--version");
@@ -278,6 +278,9 @@ try {
 
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
+
+  const scanHelp = runInstalledCli("scan", "--help");
+  assert.match(scanHelp, /--verbose\b/u);
 
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, and ${expectedPluginFiles.length} bundled plugin files.`,

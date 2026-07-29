@@ -101,6 +101,7 @@ describe("CLI", () => {
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           model: { type: "string" },
+          verbose: { type: "boolean" },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -1595,6 +1596,225 @@ describe("CLI", () => {
       codexOverrides: { features: { goals: true } },
     });
     expect(repository).toBe("repo");
+  });
+
+  test("emits verbose scan lifecycle diagnostics without changing JSON output", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult(["high"], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_SECRET_123" },
+    });
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          source: "OPENAI_API_KEY",
+          verified: false,
+        });
+        options?.onOutputDirReady?.("/tmp/scan");
+        options?.onScanStarted?.();
+        options?.onWorkerStatus?.({
+          kind: "preflight",
+          delegation: "available",
+          configuredSlots: 8,
+        });
+        options?.onWorkerStatus?.({
+          kind: "dispatch",
+          phase: "validation",
+          planned: 6,
+          started: 3,
+        });
+        options?.onReconnect?.(2, 5, {
+          reason: "rate_limit",
+          retryAfterSeconds: 1.2,
+        });
+        options?.onCost?.(result.cost!);
+        return result;
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain(
+      `codex-security: debug: scan.configuration cli_version=${JSON.stringify(VERSION)}`,
+    );
+    expect(stderr.text()).toContain(
+      `bundled_plugin_version=${JSON.stringify(BUNDLED_PLUGIN_VERSION)}`,
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: authentication.selected requested="auto" method="api_key" source="OPENAI_API_KEY" verified=false',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.output_ready scan_dir="/tmp/scan"',
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain(
+      'codex-security: debug: worker.preflight delegation="available" configured_slots=8',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: worker.phase phase="validation" planned=6 started=3',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: connection.retry reason="rate_limit" attempt=2 max_attempts=5 retry_after_seconds=1.2',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: cost.updated model="gpt-5.6-sol"',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.completed coverage="complete" findings=1',
+    );
+    expect(stderr.text()).toContain(
+      "codex-security: debug: runtime.cleanup.started",
+    );
+    expect(stderr.text()).toContain(
+      "codex-security: debug: runtime.cleanup.completed",
+    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
+  });
+
+  test("does not emit verbose diagnostics unless explicitly requested", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).not.toContain("codex-security: debug:");
+  });
+
+  test("keeps verbose dry-run authentication unverified without starting a scan", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    let scanStarted = false;
+    const preflight = {
+      ...fakePreflight("."),
+      authentication: {
+        method: "api_key" as const,
+        source: "OPENAI_API_KEY" as const,
+        verified: false as const,
+      },
+    };
+
+    expect(
+      await main(
+        ["scan", ".", "--dry-run", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            OPENAI_API_KEY: "sk-proj-SYNTHETIC_DRY_RUN_SECRET_123",
+          },
+          preflight,
+          onRun: () => {
+            scanStarted = true;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({ dryRun: true, ...preflight });
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.preflight.completed model="gpt-5.6-sol" reasoning_effort="xhigh" method="api_key" source="OPENAI_API_KEY" verified=false',
+    );
+    expect(stderr.text()).not.toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).not.toContain("SYNTHETIC_DRY_RUN_SECRET");
+    expect(scanStarted).toBe(false);
+  });
+
+  test("redacts verbose provider failures and excludes private provider context", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_KEY_123" },
+    });
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.failed classification="unauthorized"',
+    );
+    expect(stderr.text()).toContain("OPENAI_API_KEY");
+    expect(stderr.text()).not.toContain("org-private");
+    expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
+    expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
+  });
+
+  test("redacts verbose output paths and observer diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onOutputArchived?.(
+          "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
+        );
+        options?.onOutputDirReady?.(
+          "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123",
+        );
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error(`observer failed ${SYNTHETIC_CREDENTIALS}`),
+        );
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.output_archived archive_dir="/tmp/archive_[redacted]"',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.output_ready scan_dir="/tmp/scan_[redacted]"',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.observer_failed observer="onWorkerStatus"',
+    );
+    expect(stderr.text()).toContain("[redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC");
   });
 
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {

@@ -12,6 +12,7 @@ Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security
 npm install @openai/codex-security
 npx codex-security login
 npx codex-security scan .
+npx codex-security scan . --verbose
 ```
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
