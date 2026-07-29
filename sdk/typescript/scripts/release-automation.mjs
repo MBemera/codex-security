@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,6 +8,8 @@ const packageName = "@openai/codex-security";
 const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const provenancePredicate = "https://slsa.dev/provenance/v1";
 const publicNpmRegistry = "https://registry.npmjs.org/";
+const githubActionsOidcIssuer = "https://token.actions.githubusercontent.com";
+const fulcioExtensionPrefix = Buffer.from("2b0601040183bf3001", "hex");
 
 function stableReleaseTagVersion(tag) {
   if (typeof tag !== "string" || !tag.startsWith("npm-v")) {
@@ -69,6 +71,245 @@ export function requireReleaseIncrease(version, previousVersion) {
     );
   }
   return version;
+}
+
+export function requirePublishedReleaseIncrease(version, publishedVersions) {
+  releaseVersion({ name: packageName, version });
+  if (!Array.isArray(publishedVersions)) {
+    throw new Error("Published npm release versions must be an array.");
+  }
+
+  for (const publishedVersion of publishedVersions) {
+    if (
+      typeof publishedVersion === "string" &&
+      stableVersion.test(publishedVersion) &&
+      compareReleaseVersions(version, publishedVersion) <= 0
+    ) {
+      throw new Error(
+        "Release version must be greater than every published stable version.",
+      );
+    }
+  }
+
+  return version;
+}
+
+function invalidSigningCertificate() {
+  return new Error("The verified Fulcio signing certificate is invalid.");
+}
+
+function derElement(bytes, offset, limit = bytes.length) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset + 2 > limit) {
+    throw invalidSigningCertificate();
+  }
+
+  let cursor = offset;
+  const tag = bytes[cursor++];
+  if ((tag & 0x1f) === 0x1f) {
+    throw invalidSigningCertificate();
+  }
+
+  let length = bytes[cursor++];
+  if ((length & 0x80) !== 0) {
+    const count = length & 0x7f;
+    if (
+      count === 0 ||
+      count > 4 ||
+      cursor + count > limit ||
+      bytes[cursor] === 0
+    ) {
+      throw invalidSigningCertificate();
+    }
+
+    length = 0;
+    for (let index = 0; index < count; index += 1) {
+      length = length * 256 + bytes[cursor++];
+    }
+    if (length < 128) {
+      throw invalidSigningCertificate();
+    }
+  }
+
+  if (length > limit - cursor) {
+    throw invalidSigningCertificate();
+  }
+
+  return { tag, start: cursor, end: cursor + length };
+}
+
+function derChildren(bytes, element) {
+  const children = [];
+  let cursor = element.start;
+  while (cursor < element.end) {
+    const child = derElement(bytes, cursor, element.end);
+    children.push(child);
+    cursor = child.end;
+  }
+  if (cursor !== element.end) {
+    throw invalidSigningCertificate();
+  }
+  return children;
+}
+
+function fulcioCertificateExtensions(bytes) {
+  const root = derElement(bytes, 0);
+  if (root.tag !== 0x30 || root.end !== bytes.length) {
+    throw invalidSigningCertificate();
+  }
+
+  const [tbsCertificate] = derChildren(bytes, root);
+  if (tbsCertificate?.tag !== 0x30) {
+    throw invalidSigningCertificate();
+  }
+
+  const wrappers = derChildren(bytes, tbsCertificate).filter(
+    (element) => element.tag === 0xa3,
+  );
+  if (wrappers.length !== 1) {
+    throw invalidSigningCertificate();
+  }
+
+  const [extensionSequence, unexpected] = derChildren(bytes, wrappers[0]);
+  if (extensionSequence?.tag !== 0x30 || unexpected !== undefined) {
+    throw invalidSigningCertificate();
+  }
+
+  const extensions = new Map();
+  for (const extension of derChildren(bytes, extensionSequence)) {
+    if (extension.tag !== 0x30) {
+      throw invalidSigningCertificate();
+    }
+
+    const fields = derChildren(bytes, extension);
+    if (
+      (fields.length !== 2 && fields.length !== 3) ||
+      fields[0].tag !== 0x06 ||
+      (fields.length === 3 && fields[1].tag !== 0x01) ||
+      fields.at(-1).tag !== 0x04
+    ) {
+      throw invalidSigningCertificate();
+    }
+
+    const oid = bytes.subarray(fields[0].start, fields[0].end);
+    if (
+      oid.length !== fulcioExtensionPrefix.length + 1 ||
+      !oid
+        .subarray(0, fulcioExtensionPrefix.length)
+        .equals(fulcioExtensionPrefix)
+    ) {
+      continue;
+    }
+
+    const identifier = oid.at(-1);
+    if (extensions.has(identifier)) {
+      throw invalidSigningCertificate();
+    }
+
+    const field = fields.at(-1);
+    const value = bytes.subarray(field.start, field.end);
+    if (identifier >= 8) {
+      const text = derElement(value, 0);
+      if (text.tag !== 0x0c || text.end !== value.length) {
+        throw invalidSigningCertificate();
+      }
+      extensions.set(
+        identifier,
+        value.subarray(text.start, text.end).toString("utf8"),
+      );
+    } else {
+      extensions.set(identifier, value.toString("utf8"));
+    }
+  }
+
+  return extensions;
+}
+
+function verifySigningCertificate(bundle, expected) {
+  const material = bundle?.verificationMaterial;
+  const encoded =
+    material?.certificate?.rawBytes ??
+    material?.x509CertificateChain?.certificates?.[0]?.rawBytes;
+
+  let certificate;
+  let extensions;
+  try {
+    if (typeof encoded !== "string" || encoded.length === 0) {
+      throw invalidSigningCertificate();
+    }
+    const raw = Buffer.from(encoded, "base64");
+    if (raw.toString("base64") !== encoded) {
+      throw invalidSigningCertificate();
+    }
+    certificate = new X509Certificate(raw);
+    extensions = fulcioCertificateExtensions(certificate.raw);
+  } catch {
+    throw invalidSigningCertificate();
+  }
+
+  const issuerV1 = extensions.get(1);
+  const issuerV2 = extensions.get(8);
+  if (
+    (issuerV1 === undefined && issuerV2 === undefined) ||
+    (issuerV1 !== undefined && issuerV1 !== githubActionsOidcIssuer) ||
+    (issuerV2 !== undefined && issuerV2 !== githubActionsOidcIssuer)
+  ) {
+    throw new Error(
+      "The Fulcio certificate must use the GitHub Actions OIDC issuer.",
+    );
+  }
+
+  const workflowIdentity =
+    `${expected.repository}/.github/workflows/node-release.yml@` +
+    expected.releaseRef;
+  if (
+    certificate.subjectAltName !== `URI:${workflowIdentity}` ||
+    extensions.get(9) !== workflowIdentity ||
+    extensions.get(18) !== workflowIdentity ||
+    extensions.get(12) !== expected.repository ||
+    extensions.get(14) !== expected.releaseRef
+  ) {
+    throw new Error(
+      "The Fulcio certificate must identify the protected release workflow.",
+    );
+  }
+
+  if (
+    extensions.get(10) !== expected.gitHead ||
+    extensions.get(13) !== expected.gitHead ||
+    extensions.get(19) !== expected.gitHead
+  ) {
+    throw new Error(
+      "The Fulcio certificate must identify the exact release commit.",
+    );
+  }
+
+  if (extensions.get(11) !== "github-hosted") {
+    throw new Error(
+      "The Fulcio certificate must identify a GitHub-hosted release runner.",
+    );
+  }
+
+  const runPrefix = `${expected.repository}/actions/runs/${expected.runId}/attempts/`;
+  const certificateRun = extensions.get(21);
+  if (
+    typeof certificateRun !== "string" ||
+    !certificateRun.startsWith(runPrefix) ||
+    !/^[1-9][0-9]*$/u.test(certificateRun.slice(runPrefix.length))
+  ) {
+    throw new Error(
+      "The Fulcio certificate must identify the exact release run.",
+    );
+  }
+
+  if (
+    extensions.get(23) !== "npm" ||
+    extensions.get(24) !==
+      `repo:${expected.repository.slice("https://github.com/".length)}:environment:npm`
+  ) {
+    throw new Error(
+      "The Fulcio certificate must identify the protected npm environment.",
+    );
+  }
 }
 
 export function releaseHistory(tag, history) {
@@ -212,9 +453,11 @@ export function verifySignatureAudit(report, archive, expected) {
     throw new Error("The verified npm package must have SLSA v1 provenance.");
   }
 
-  const provenance = verified.attestationBundles?.find(
-    (candidate) => candidate?.predicateType === provenancePredicate,
-  );
+  const provenance = Array.isArray(verified.attestationBundles)
+    ? verified.attestationBundles.find(
+        (candidate) => candidate?.predicateType === provenancePredicate,
+      )
+    : undefined;
   const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
   if (typeof encodedStatement !== "string") {
     throw new Error("The verified SLSA provenance bundle is missing.");
@@ -308,6 +551,13 @@ export function verifySignatureAudit(report, archive, expected) {
     );
   }
 
+  verifySigningCertificate(provenance.bundle, {
+    repository,
+    releaseRef,
+    gitHead: expected.gitHead,
+    runId,
+  });
+
   return {
     version,
     gitHead: expected.gitHead,
@@ -328,7 +578,7 @@ export function verifyGitHubRelease(release, archive, expectedTag, assetName) {
   const expectedDigest =
     "sha256:" + createHash("sha256").update(archive).digest("hex");
   const asset = Array.isArray(release.assets)
-    ? release.assets.find((candidate) => candidate.name === assetName)
+    ? release.assets.find((candidate) => candidate?.name === assetName)
     : undefined;
   if (asset?.digest !== expectedDigest) {
     throw new Error(
@@ -367,6 +617,14 @@ function main() {
 
   if (command === "require-increase" && process.argv.length === 5) {
     console.log(requireReleaseIncrease(process.argv[3], process.argv[4]));
+    return;
+  }
+
+  if (command === "require-published-increase" && process.argv.length === 4) {
+    const publishedVersions = JSON.parse(readFileSync(0, "utf8"));
+    console.log(
+      requirePublishedReleaseIncrease(process.argv[3], publishedVersions),
+    );
     return;
   }
 
@@ -438,6 +696,8 @@ function main() {
     "Usage: release-automation.mjs version <package.json>, " +
       "release-tag <ref-type> <ref> <ref-name> <package.json>, " +
       "require-increase <version> <previous-version>, " +
+      "require-published-increase <version> " +
+      "(published npm versions JSON from stdin), " +
       "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +

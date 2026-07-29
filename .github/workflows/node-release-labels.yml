@@ -82,11 +82,15 @@ jobs:
             if ! gh api \
               "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
               --silent >/dev/null 2>&1; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/labels" \
+              if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels" \
                 -f name=skip-release-notes \
                 -f color=ededed \
                 -f description="Omit internal changes from generated release notes" \
-                --silent
+                --silent >/dev/null 2>&1; then
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
+                  --silent >/dev/null
+              fi
             fi
           fi
 

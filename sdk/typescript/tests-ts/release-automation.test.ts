@@ -16,6 +16,10 @@ type ReleaseAutomation = {
   ) => string;
   compareReleaseVersions: (left: string, right: string) => -1 | 0 | 1;
   requireReleaseIncrease: (version: string, previousVersion: string) => string;
+  requirePublishedReleaseIncrease: (
+    version: string,
+    publishedVersions: unknown,
+  ) => string;
   releaseHistory: (
     tag: string,
     history: {
@@ -67,6 +71,7 @@ const {
   releaseTagVersion,
   compareReleaseVersions,
   requireReleaseIncrease,
+  requirePublishedReleaseIncrease,
   releaseHistory,
   verifyPublishedRelease,
   verifySignatureAudit,
@@ -76,6 +81,36 @@ const {
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
+const releaseSigningCertificate =
+  "MIIHOjCCBr+gAwIBAgIUDDD6xE6tccKRAzn6GcB6Ajvw2+swCgYIKoZIzj0EAwMwNzEVMBMGA1UEChMMc2lnc3Rv" +
+  "cmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRlcm1lZGlhdGUwHhcNMjYwNzI5MTg1MTA1WhcNMjYwNzI5MTkw" +
+  "MTA1WjAAMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEkin3vstve90HTjDjvA07JK3um96wz1+wu9IbeAOgqPZW" +
+  "7Ijzx++FAEBWmRp9dJiLOa3xlHM1ZEqjZc3FlbBQrqOCBd4wggXaMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAK" +
+  "BggrBgEFBQcDAzAdBgNVHQ4EFgQUn/ffAFOuPTzNV/Vezq93CcIME+wwHwYDVR0jBBgwFoAU39Ppz1YkEZb5qNjp" +
+  "KFWixi4YZD8wbgYDVR0RAQH/BGQwYoZgaHR0cHM6Ly9naXRodWIuY29tL29wZW5haS9jb2RleC1zZWN1cml0eS8u" +
+  "Z2l0aHViL3dvcmtmbG93cy9ub2RlLXJlbGVhc2UueW1sQHJlZnMvdGFncy9ucG0tdjAuMS4yMDkGCisGAQQBg78w" +
+  "AQEEK2h0dHBzOi8vdG9rZW4uYWN0aW9ucy5naXRodWJ1c2VyY29udGVudC5jb20wEgYKKwYBBAGDvzABAgQEcHVz" +
+  "aDA2BgorBgEEAYO/MAEDBCgxZTAzYzg5YWQyMmQyZGY1YWU2NWIxNDZiZTE0ODNiMzYwODU3MmE5MBoGCisGAQQB" +
+  "g78wAQQEDG5vZGUtcmVsZWFzZTAjBgorBgEEAYO/MAEFBBVvcGVuYWkvY29kZXgtc2VjdXJpdHkwIgYKKwYBBAGD" +
+  "vzABBgQUcmVmcy90YWdzL25wbS12MC4xLjIwOwYKKwYBBAGDvzABCAQtDCtodHRwczovL3Rva2VuLmFjdGlvbnMu" +
+  "Z2l0aHVidXNlcmNvbnRlbnQuY29tMHAGCisGAQQBg78wAQkEYgxgaHR0cHM6Ly9naXRodWIuY29tL29wZW5haS9j" +
+  "b2RleC1zZWN1cml0eS8uZ2l0aHViL3dvcmtmbG93cy9ub2RlLXJlbGVhc2UueW1sQHJlZnMvdGFncy9ucG0tdjAu" +
+  "MS4yMDgGCisGAQQBg78wAQoEKgwoMWUwM2M4OWFkMjJkMmRmNWFlNjViMTQ2YmUxNDgzYjM2MDg1NzJhOTAdBgor" +
+  "BgEEAYO/MAELBA8MDWdpdGh1Yi1ob3N0ZWQwOAYKKwYBBAGDvzABDAQqDChodHRwczovL2dpdGh1Yi5jb20vb3Bl" +
+  "bmFpL2NvZGV4LXNlY3VyaXR5MDgGCisGAQQBg78wAQ0EKgwoMWUwM2M4OWFkMjJkMmRmNWFlNjViMTQ2YmUxNDgz" +
+  "YjM2MDg1NzJhOTAkBgorBgEEAYO/MAEOBBYMFHJlZnMvdGFncy9ucG0tdjAuMS4yMBoGCisGAQQBg78wAQ8EDAwK" +
+  "MTI5OTc2OTIyMDApBgorBgEEAYO/MAEQBBsMGWh0dHBzOi8vZ2l0aHViLmNvbS9vcGVuYWkwGAYKKwYBBAGDvzAB" +
+  "EQQKDAgxNDk1NzA4MjBwBgorBgEEAYO/MAESBGIMYGh0dHBzOi8vZ2l0aHViLmNvbS9vcGVuYWkvY29kZXgtc2Vj" +
+  "dXJpdHkvLmdpdGh1Yi93b3JrZmxvd3Mvbm9kZS1yZWxlYXNlLnltbEByZWZzL3RhZ3MvbnBtLXYwLjEuMjA4Bgor" +
+  "BgEEAYO/MAETBCoMKDFlMDNjODlhZDIyZDJkZjVhZTY1YjE0NmJlMTQ4M2IzNjA4NTcyYTkwFAYKKwYBBAGDvzAB" +
+  "FAQGDARwdXNoMFwGCisGAQQBg78wARUETgxMaHR0cHM6Ly9naXRodWIuY29tL29wZW5haS9jb2RleC1zZWN1cml0" +
+  "eS9hY3Rpb25zL3J1bnMvMzA0ODE1OTYyMjkvYXR0ZW1wdHMvMTAWBgorBgEEAYO/MAEWBAgMBnB1YmxpYzATBgor" +
+  "BgEEAYO/MAEXBAUMA25wbTA6BgorBgEEAYO/MAEYBCwMKnJlcG86b3BlbmFpL2NvZGV4LXNlY3VyaXR5OmVudmly" +
+  "b25tZW50Om5wbTCBigYKKwYBBAHWeQIEAgR8BHoAeAB2AN09MGrGxxEyYxkeHJlnNwKiSl643jyt/4eKcoAvKe6O" +
+  "AAABn683UUoAAAQDAEcwRQIhAIByLL09iV3Tt78+V79VHOAcTGiwBe8ZQJO2YfWKr5CcAiAYJQpfxgVSyerx1dTC" +
+  "SivSEzQt/ABuKvEHEFavAb+qCzAKBggqhkjOPQQDAwNpADBmAjEA09chNJjy7FhYVY6n7ioITfLzDBs9oaHuGFrD" +
+  "HXYnMKbVXVlkt2fVM8WjllMQitjhAjEA2m9qBcOod9M8uMCw76eVJk3YloyAhcTDZfMTtMWaM5DpNG4v/vEZ+MIt" +
+  "zIiMHK/0";
 const archive = Buffer.from("verified codex security release artifact");
 const integrity =
   "sha512-" + createHash("sha512").update(archive).digest("base64");
@@ -136,6 +171,8 @@ type SignatureAuditFixture = {
   includeVerified?: boolean;
   includeProvenance?: boolean;
   includeBundle?: boolean;
+  signingCertificate?: string | null;
+  certificateLocation?: "certificate" | "chain";
   subjectName?: string;
   subjectDigest?: string;
   repository?: string;
@@ -150,6 +187,18 @@ function signatureAudit(options: SignatureAuditFixture = {}): ReleaseMetadata {
   const version = options.version ?? "0.1.2";
   const repository = options.repository ?? releaseRepository;
   const releaseRef = options.workflowRef ?? `refs/tags/npm-v${version}`;
+  const signingCertificate =
+    options.signingCertificate === undefined
+      ? releaseSigningCertificate
+      : options.signingCertificate;
+  const verificationMaterial =
+    options.certificateLocation === "chain"
+      ? {
+          x509CertificateChain: {
+            certificates: [{ rawBytes: signingCertificate }],
+          },
+        }
+      : { certificate: { rawBytes: signingCertificate } };
   const statement = {
     _type: "https://in-toto.io/Statement/v1",
     subject: [
@@ -217,6 +266,7 @@ function signatureAudit(options: SignatureAuditFixture = {}): ReleaseMetadata {
                       {
                         predicateType: "https://slsa.dev/provenance/v1",
                         bundle: {
+                          verificationMaterial,
                           dsseEnvelope: {
                             payload: Buffer.from(
                               JSON.stringify(statement),
@@ -230,6 +280,34 @@ function signatureAudit(options: SignatureAuditFixture = {}): ReleaseMetadata {
   };
 }
 
+function signingCertificateWithReplacement(
+  original: string,
+  replacement: string,
+): string {
+  const needle = Buffer.from(original);
+  const substitute = Buffer.from(replacement);
+  if (needle.length !== substitute.length) {
+    throw new Error(
+      "Signing certificate replacements must preserve DER lengths.",
+    );
+  }
+
+  const certificate = Buffer.from(releaseSigningCertificate, "base64");
+  let offset = certificate.indexOf(needle);
+  if (offset === -1) {
+    throw new Error(
+      "Signing certificate does not contain the requested value.",
+    );
+  }
+
+  while (offset !== -1) {
+    substitute.copy(certificate, offset);
+    offset = certificate.indexOf(needle, offset + substitute.length);
+  }
+
+  return certificate.toString("base64");
+}
+
 function signatureExpected() {
   return {
     version: "0.1.2",
@@ -237,6 +315,31 @@ function signatureExpected() {
     repository: releaseRepository,
     runId: releaseRun,
   };
+}
+
+function workflowStepShell(workflow: string, stepName: string): string {
+  const stepMarker = `      - name: ${stepName}\n`;
+  const stepStart = workflow.indexOf(stepMarker);
+  if (stepStart === -1) {
+    throw new Error(`Workflow step is missing: ${stepName}`);
+  }
+
+  const nextStep = workflow.indexOf("\n      - name: ", stepStart + 1);
+  const step = workflow.slice(
+    stepStart,
+    nextStep === -1 ? undefined : nextStep,
+  );
+  const runMarker = "        run: |\n";
+  const runStart = step.indexOf(runMarker);
+  if (runStart === -1) {
+    throw new Error(`Workflow step has no shell script: ${stepName}`);
+  }
+
+  return step
+    .slice(runStart + runMarker.length)
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
 }
 
 describe("stable npm release versions", () => {
@@ -358,6 +461,40 @@ describe("monotonic stable release versions", () => {
     expect(() => compareReleaseVersions("0.1.3-beta.1", "0.1.2")).toThrow(
       "Release versions must use stable X.Y.Z versions.",
     );
+  });
+
+  test("requires every release to exceed every published stable version", () => {
+    expect(
+      requirePublishedReleaseIncrease("0.1.11", [
+        "0.1.9",
+        "0.1.10",
+        "0.1.3-beta.1",
+      ]),
+    ).toBe("0.1.11");
+  });
+
+  test("rejects a manual release below the highest published version", () => {
+    expect(() =>
+      requirePublishedReleaseIncrease("1.9.9", ["1.9.8", "2.0.0"]),
+    ).toThrow(
+      "Release version must be greater than every published stable version.",
+    );
+  });
+
+  test("rejects a previously published release version", () => {
+    expect(() =>
+      requirePublishedReleaseIncrease("0.1.2", ["0.1.0", "0.1.2"]),
+    ).toThrow(
+      "Release version must be greater than every published stable version.",
+    );
+  });
+
+  test("fails safely when published release history is malformed", () => {
+    for (const publishedVersions of [null, {}, "0.1.2"]) {
+      expect(() =>
+        requirePublishedReleaseIncrease("0.1.3", publishedVersions),
+      ).toThrow("Published npm release versions must be an array.");
+    }
   });
 });
 
@@ -515,6 +652,115 @@ describe("cryptographically verified npm provenance", () => {
     });
   });
 
+  test("accepts the real Fulcio certificate in the legacy chain format", () => {
+    expect(
+      verifySignatureAudit(
+        signatureAudit({ certificateLocation: "chain" }),
+        archive,
+        signatureExpected(),
+      ),
+    ).toEqual({
+      version: "0.1.2",
+      gitHead: releaseCommit,
+      repository: releaseRepository,
+      runId: releaseRun,
+      sha512,
+    });
+  });
+
+  test("rejects missing and malformed Fulcio signing certificates", () => {
+    for (const signingCertificate of [null, "not-base64"]) {
+      expect(() =>
+        verifySignatureAudit(
+          signatureAudit({ signingCertificate }),
+          archive,
+          signatureExpected(),
+        ),
+      ).toThrow("The verified Fulcio signing certificate is invalid.");
+    }
+  });
+
+  test("rejects a certificate from another OIDC issuer", () => {
+    expect(() =>
+      verifySignatureAudit(
+        signatureAudit({
+          signingCertificate: signingCertificateWithReplacement(
+            "token.actions.githubusercontent.com",
+            "token.actions.githabusercontent.com",
+          ),
+        }),
+        archive,
+        signatureExpected(),
+      ),
+    ).toThrow(
+      "The Fulcio certificate must use the GitHub Actions OIDC issuer.",
+    );
+  });
+
+  test("rejects a certificate for another GitHub Actions workflow", () => {
+    expect(() =>
+      verifySignatureAudit(
+        signatureAudit({
+          signingCertificate: signingCertificateWithReplacement(
+            "node-release.yml",
+            "fake-release.yml",
+          ),
+        }),
+        archive,
+        signatureExpected(),
+      ),
+    ).toThrow(
+      "The Fulcio certificate must identify the protected release workflow.",
+    );
+  });
+
+  test("rejects a certificate for a different release commit", () => {
+    expect(() =>
+      verifySignatureAudit(
+        signatureAudit({
+          signingCertificate: signingCertificateWithReplacement(
+            releaseCommit,
+            "2e03c89ad22d2df5ae65b146be1483b3608572a9",
+          ),
+        }),
+        archive,
+        signatureExpected(),
+      ),
+    ).toThrow("The Fulcio certificate must identify the exact release commit.");
+  });
+
+  test("rejects a certificate for another release run", () => {
+    expect(() =>
+      verifySignatureAudit(
+        signatureAudit({
+          signingCertificate: signingCertificateWithReplacement(
+            releaseRun,
+            "30481596228",
+          ),
+        }),
+        archive,
+        signatureExpected(),
+      ),
+    ).toThrow("The Fulcio certificate must identify the exact release run.");
+  });
+
+  test("rejects a certificate outside the protected npm environment", () => {
+    expect(() =>
+      verifySignatureAudit(
+        signatureAudit({
+          signingCertificate: signingCertificateWithReplacement(
+            "environment:npm",
+            "environment:dev",
+          ),
+        }),
+        archive,
+        signatureExpected(),
+      ),
+    ).toThrow(
+      "The Fulcio certificate must identify the protected npm environment.",
+    );
+  });
+
   test("rejects invalid or missing registry signatures", () => {
     expect(() =>
       verifySignatureAudit(
@@ -575,6 +821,24 @@ describe("cryptographically verified npm provenance", () => {
         signatureExpected(),
       ),
     ).toThrow("The verified SLSA provenance bundle is missing.");
+  });
+
+  test("rejects malformed attestation bundle collections safely", () => {
+    const report = signatureAudit();
+    const [verified] = report["verified"] as ReleaseMetadata[];
+
+    for (const attestationBundles of [null, {}, "invalid", 42, [null]]) {
+      expect(() =>
+        verifySignatureAudit(
+          {
+            ...report,
+            verified: [{ ...verified, attestationBundles }],
+          },
+          archive,
+          signatureExpected(),
+        ),
+      ).toThrow("The verified SLSA provenance bundle is missing.");
+    }
   });
 
   test("rejects provenance for a different package subject or archive", () => {
@@ -722,6 +986,41 @@ describe("idempotent GitHub release verification", () => {
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
   });
+
+  test("rejects malformed GitHub release assets safely", () => {
+    for (const assets of [null, {}, [null]]) {
+      expect(() =>
+        verifyGitHubRelease(
+          { ...githubRelease(), assets },
+          archive,
+          "npm-v0.1.2",
+          "openai-codex-security-0.1.2.tgz",
+        ),
+      ).toThrow(
+        "Existing GitHub Release asset must match the verified npm artifact.",
+      );
+    }
+  });
+
+  test("ignores malformed assets before the exact verified release asset", () => {
+    const release = githubRelease();
+
+    expect(
+      verifyGitHubRelease(
+        {
+          ...release,
+          assets: [null, ...(release["assets"] as ReleaseMetadata[])],
+        },
+        archive,
+        "npm-v0.1.2",
+        "openai-codex-security-0.1.2.tgz",
+      ),
+    ).toEqual({
+      tag: "npm-v0.1.2",
+      asset: "openai-codex-security-0.1.2.tgz",
+      digest,
+    });
+  });
 });
 
 describe("GitHub release workflow safeguards", () => {
@@ -739,6 +1038,57 @@ describe("GitHub release workflow safeguards", () => {
       'git merge-base --is-ancestor "$GITHUB_SHA" origin/main',
     );
     expect(releaseCutWorkflow).toContain("require-increase");
+    expect(releaseCutWorkflow).toContain("require-published-increase");
+    expect(releaseCutWorkflow).toContain(
+      "npm view @openai/codex-security versions",
+    );
+  });
+
+  test("executes the manual release cut against all published versions", () => {
+    const script = workflowStepShell(
+      releaseCutWorkflow,
+      "Resolve the stable package version",
+    );
+    const mocks = [
+      "git() { return 0; }",
+      "npm() { printf '%s\\n' '[\"0.1.1\",\"2.0.0\"]'; }",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        BEFORE_SHA: "",
+        GITHUB_EVENT_NAME: "workflow_dispatch",
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_SHA: releaseCommit,
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Release version must be greater than every published stable version.",
+    );
+  });
+
+  test("durably queues every release-cut and protected publishing run", () => {
+    expect(releaseCutWorkflow).toMatch(
+      /concurrency:\s*\n\s+group: node-release-cut\s*\n\s+queue: max/u,
+    );
+    expect(protectedReleaseWorkflow).toMatch(
+      /concurrency:\s*\n\s+group: \$\{\{ github\.workflow \}\}\s*\n\s+queue: max/u,
+    );
+  });
+
+  test("serializes every GitHub release and historical backfill", () => {
+    expect(githubReleaseWorkflow).toMatch(
+      /concurrency:\s*\n\s+group: node-github-release\s*\n\s+queue: max/u,
+    );
+    expect(githubReleaseWorkflow).not.toContain(
+      "group: node-github-release-${{",
+    );
   });
 
   test("explicitly prevents historical releases becoming latest", () => {
@@ -768,6 +1118,10 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test("cryptographically verifies the exact npm provenance bundle", () => {
+    expect(githubReleaseWorkflow).toContain('node-version: "24.15.0"');
+    expect(githubReleaseWorkflow).toContain(
+      'if [[ "$(npm --version)" != "11.12.1" ]]; then',
+    );
     expect(githubReleaseWorkflow).toContain("npm audit signatures");
     expect(githubReleaseWorkflow).toContain("--include-attestations");
     expect(githubReleaseWorkflow).toContain("verify-provenance");
@@ -790,6 +1144,67 @@ describe("GitHub release workflow safeguards", () => {
     expect(releaseLabelsWorkflow).toContain("return 0");
   });
 
+  test("recovers when another PR concurrently creates the skip label", () => {
+    expect(releaseLabelsWorkflow).toContain(
+      'if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels"',
+    );
+    expect(releaseLabelsWorkflow).toContain(
+      '"repos/$GITHUB_REPOSITORY/labels/skip-release-notes"',
+    );
+  });
+
+  test("executes and recovers from concurrent skip-label creation", () => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const mock = [
+      "skip_label_exists=0",
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      "  local method=GET",
+      '  if [[ "${1:-}" == "--method" ]]; then',
+      '    method="$2"',
+      "    shift 2",
+      "  fi",
+      '  local endpoint="$1"',
+      '  case "$method $endpoint" in',
+      '    "GET repos/test/codex-security/issues/17")',
+      "      printf '%s\\n' 'release: automate published notes'",
+      "      ;;",
+      '    "GET repos/test/codex-security/issues/17/labels")',
+      "      return 0",
+      "      ;;",
+      '    "GET repos/test/codex-security/labels/skip-release-notes")',
+      '      [[ "$skip_label_exists" == 1 ]]',
+      "      ;;",
+      '    "POST repos/test/codex-security/labels")',
+      "      skip_label_exists=1",
+      "      return 1",
+      "      ;;",
+      '    "POST repos/test/codex-security/issues/17/labels")',
+      '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
+      "      printf '%s\\n' 'applied skip-release-notes'",
+      "      ;;",
+      "    *) return 66 ;;",
+      "  esac",
+      "}",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("applied skip-release-notes");
+  });
+
   test("documents JSON stdin for every verification command", () => {
     const result = spawnSync(
       "node",
@@ -797,6 +1212,7 @@ describe("GitHub release workflow safeguards", () => {
       { encoding: "utf8", timeout: 10_000 },
     );
     expect(result.status).toBe(1);
+    expect(result.stderr).toContain("published npm versions JSON from stdin");
     expect(result.stderr).toContain("package metadata JSON from stdin");
     expect(result.stderr).toContain("signature audit JSON from stdin");
     expect(result.stderr).toContain("GitHub release JSON from stdin");

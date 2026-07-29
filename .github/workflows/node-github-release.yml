@@ -19,8 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: node-github-release-${{ inputs.tag || github.event.workflow_run.head_branch || github.run_id }}
-  cancel-in-progress: false
+  group: node-github-release
+  queue: max
 
 jobs:
   release:
@@ -44,9 +44,18 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
-          node-version: "24"
+          node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
+
+      - name: Verify bundled provenance-capable npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(npm --version)" != "11.12.1" ]]; then
+            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
+            exit 1
+          fi
 
       - name: Resolve the successful protected release
         id: release
