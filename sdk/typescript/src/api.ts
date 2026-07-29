@@ -47,11 +47,16 @@ import {
 } from "./worker-progress.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
+  acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
   cleanupSdkDirectory,
+  codexSecurityCredentialAllowsAmbientImport,
+  codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
   importAmbientAuth,
+  prepareCodexSecurityCredentialHome,
+  preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
@@ -61,6 +66,7 @@ import {
   resolvePluginPath,
   resolvePluginPython,
   runWorkbench,
+  setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
@@ -103,6 +109,7 @@ interface CodexClientLike {
 
 interface PreparedRuntime {
   codexHome: string;
+  persistentCredentialHome?: boolean;
   bootstrapWorkspace?: string;
   configPath?: string;
   plugin: PluginInstall;
@@ -303,6 +310,7 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
+    let releaseCredentialHome: (() => Promise<void>) | null = null;
     let completionCost: ScanCost | null = null;
     let activeScan: {
       id: string;
@@ -360,6 +368,21 @@ export class CodexSecurity {
         this.#dependencies.environment,
         options.auth,
       );
+      if (
+        authentication.method === "stored_credentials" &&
+        this.#dependencies.prepareRuntime === undefined
+      ) {
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          scanEnvironment,
+          (path) =>
+            requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+        );
+        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
+          credentialHome,
+          signal,
+        );
+      }
+      const previousRuntime = this.#runtime;
       const runtime = await this.#ensureRuntime(
         signal,
         temporaryRoot,
@@ -367,6 +390,13 @@ export class CodexSecurity {
           requireOutputOutsideRepository(protectedRoot, path, "runtime"),
         options.auth,
       );
+      if (
+        runtime === previousRuntime &&
+        runtime.persistentCredentialHome === true &&
+        this.#dependencies.prepareRuntime === undefined
+      ) {
+        await this.#refreshPersistentRuntime(runtime, scanEnvironment, signal);
+      }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
       if (
@@ -398,22 +428,23 @@ export class CodexSecurity {
           ? environmentApiKey(this.#dependencies.environment)
           : null;
       if (apiKey !== null) {
-        const codexCommand = this.#codexCommand();
-        const login = await persistApiKey(
-          codexCommand,
-          runtime.environment,
-          apiKey,
-          signal,
-        );
-        if (!login.success) {
-          throw new CodexSecurityError(
-            `Codex API-key login failed: ${login.stderr.trim() || login.stdout.trim() || "unknown error"}`,
-          );
-        }
-        runtime.credentialsAvailable = true;
         this.#runtimeCredentialSource = "api_key";
       }
-      if (!runtime.credentialsAvailable) {
+      if (
+        !runtime.credentialsAvailable &&
+        authentication.method === "stored_credentials"
+      ) {
+        const status = await accountStatus(
+          this.#codexCommand(),
+          runtime.environment,
+          signal,
+        );
+        runtime.credentialsAvailable = status.authenticated;
+        this.#runtimeCredentialSource = status.authenticated
+          ? "stored_credentials"
+          : null;
+      }
+      if (!runtime.credentialsAvailable && apiKey === null) {
         throw new AuthenticationRequiredError(
           "No credentials were found. Run 'codex-security login', use " +
             "'codex-security login --device-auth' on a remote or headless machine, or set " +
@@ -706,7 +737,10 @@ export class CodexSecurity {
         ...runtimePaths,
       };
       const codex = this.#dependencies.createCodex({
-        env: definedEnvironment(environment),
+        ...(apiKey === null ? {} : { apiKey }),
+        env: definedEnvironment(
+          selectedScanEnvironment(environment, "chatgpt"),
+        ),
         config: {
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
@@ -826,10 +860,14 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
-      await Promise.all([
-        knowledgeBase?.cleanup(),
-        removeTargetPathsFile(targetPathsFile),
-      ]);
+      try {
+        await Promise.all([
+          knowledgeBase?.cleanup(),
+          removeTargetPathsFile(targetPathsFile),
+        ]);
+      } finally {
+        await releaseCredentialHome?.();
+      }
     }
   }
 
@@ -844,18 +882,27 @@ export class CodexSecurity {
           signal,
         ),
       }),
+      "chatgpt",
     );
     if (!result.success) {
       throw new CodexSecurityError(
         `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
       );
     }
+    if (runtime.persistentCredentialHome === true) {
+      await setCodexSecurityCredentialLogout(runtime.codexHome, false);
+    }
     runtime.credentialsAvailable = true;
     this.#runtimeCredentialSource = "api_key";
   }
 
   public async loginChatGPT(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime();
+    const runtime = await this.#ensureRuntime(
+      undefined,
+      undefined,
+      undefined,
+      "chatgpt",
+    );
     this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
@@ -874,7 +921,12 @@ export class CodexSecurity {
   }
 
   public async loginChatGPTDeviceCode(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime();
+    const runtime = await this.#ensureRuntime(
+      undefined,
+      undefined,
+      undefined,
+      "chatgpt",
+    );
     this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
@@ -919,7 +971,11 @@ export class CodexSecurity {
         );
         return preparedRuntime;
       },
+      "chatgpt",
     );
+    if (runtime.persistentCredentialHome === true) {
+      await setCodexSecurityCredentialLogout(runtime.codexHome, true);
+    }
     runtime.credentialsAvailable = false;
     this.#runtimeCredentialSource = null;
   }
@@ -952,14 +1008,21 @@ export class CodexSecurity {
     this.#runtime = null;
     this.#runtimePromise = null;
     if (runtime !== null && runtime !== undefined) {
-      const cleanupResults = await Promise.allSettled(
-        [runtime.codexHome, runtime.bootstrapWorkspace]
-          .filter((path): path is string => path !== undefined)
-          .map((path) => cleanupSdkDirectory(path)),
-      );
-      for (const result of cleanupResults) {
-        if (result.status === "rejected") throw result.reason;
-      }
+      await this.#cleanupRuntime(runtime);
+    }
+  }
+
+  async #cleanupRuntime(runtime: PreparedRuntime): Promise<void> {
+    const cleanupResults = await Promise.allSettled(
+      [
+        runtime.persistentCredentialHome ? undefined : runtime.codexHome,
+        runtime.bootstrapWorkspace,
+      ]
+        .filter((path): path is string => path !== undefined)
+        .map((path) => cleanupSdkDirectory(path)),
+    );
+    for (const result of cleanupResults) {
+      if (result.status === "rejected") throw result.reason;
     }
   }
 
@@ -969,10 +1032,16 @@ export class CodexSecurity {
 
   async #runOperation<T>(
     operation: (runtime: PreparedRuntime, signal: AbortSignal) => Promise<T>,
+    auth: ScanAuthMode = "auto",
   ): Promise<T> {
     return await this.#trackOperation(async () => {
       const signal = this.#abortController.signal;
-      const runtime = await this.#ensureRuntime(signal);
+      const runtime = await this.#ensureRuntime(
+        signal,
+        undefined,
+        undefined,
+        auth,
+      );
       this.#requireOpen();
       const result = await operation(runtime, signal);
       this.#requireOpen();
@@ -1005,7 +1074,23 @@ export class CodexSecurity {
     auth: ScanAuthMode = "auto",
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
-    if (this.#runtime !== null) return this.#runtime;
+    if (this.#runtime !== null) {
+      const usePersistentCredentials =
+        scanAuthentication(this.#dependencies.environment, auth).method ===
+        "stored_credentials";
+      if (
+        this.#dependencies.prepareRuntime !== undefined ||
+        this.#runtime.persistentCredentialHome === undefined ||
+        this.#runtime.persistentCredentialHome === usePersistentCredentials
+      ) {
+        return this.#runtime;
+      }
+      await this.#cleanupRuntime(this.#runtime);
+      this.#runtime = null;
+      this.#runtimePromise = null;
+      this.#runtimeCredentialSource = null;
+      this.#requireOpen();
+    }
     if (this.#runtimePromise === null) {
       const runtimePromise = this.#prepareRuntime(
         signal ?? this.#abortController.signal,
@@ -1040,6 +1125,39 @@ export class CodexSecurity {
 
   #codexCommand(): CodexCommand {
     return (this.#dependencies.resolveCodexCommand ?? resolveCodexCommand)();
+  }
+
+  async #refreshPersistentRuntime(
+    runtime: PreparedRuntime,
+    environment: ProcessEnvironment,
+    signal: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    const mergedConfig = await mergedCodexConfig(this.config);
+    const config = await preserveCodexSecurityPluginRegistration(
+      runtime.codexHome,
+      scanRuntimeCodexConfig(
+        mergedConfig,
+        codexSecurityStateDirectory(environment),
+        runtime.codexHome,
+      ),
+    );
+    await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
+    if (runtime.configPath !== undefined) {
+      await writeCodexConfig(
+        runtime.configPath,
+        scanPreflightCodexConfig(mergedConfig),
+      );
+    }
+    runtime.plugin = await bootstrapPlugin(
+      runtime.codexHome,
+      runtime.plugin.pluginRoot,
+      {
+        environment: withoutCodexHome(environment),
+        signal,
+      },
+    );
+    runtime.effectiveConfig = mergedConfig;
   }
 
   async #validateLocalInputs(
@@ -1091,22 +1209,30 @@ export class CodexSecurity {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
-    const codexHome = await createIsolatedHome(temporaryRoot, validateLocation);
+    const processEnvironment = selectedScanEnvironment(
+      this.#dependencies.environment,
+      auth,
+    );
+    const persistentCredentialHome =
+      scanAuthentication(this.#dependencies.environment, auth).method ===
+      "stored_credentials";
+    const codexHome = persistentCredentialHome
+      ? await prepareCodexSecurityCredentialHome(
+          processEnvironment,
+          validateLocation,
+        )
+      : await createIsolatedHome(temporaryRoot, validateLocation);
     let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
       bootstrapWorkspace = await createIsolatedHome(
-        dirname(codexHome),
+        temporaryRoot,
         validateLocation,
       );
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
         bootstrapWorkspace,
         signal,
-      );
-      const processEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
-        auth,
       );
       const nodeAmbientHome = join(homedir(), ".codex");
       const configuredAmbientHome = environmentValue(
@@ -1115,9 +1241,13 @@ export class CodexSecurity {
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
       const mergedConfig = await mergedCodexConfig(this.config);
-      const codexConfig = scanRuntimeCodexConfig(
-        mergedConfig,
-        codexSecurityStateDirectory(processEnvironment),
+      const codexConfig = await preserveCodexSecurityPluginRegistration(
+        codexHome,
+        scanRuntimeCodexConfig(
+          mergedConfig,
+          codexSecurityStateDirectory(processEnvironment),
+          persistentCredentialHome ? codexHome : undefined,
+        ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
@@ -1137,6 +1267,7 @@ export class CodexSecurity {
       );
       return {
         codexHome,
+        persistentCredentialHome,
         bootstrapWorkspace,
         configPath,
         plugin,
@@ -1151,7 +1282,7 @@ export class CodexSecurity {
       };
     } catch (error) {
       const cleanupResults = await Promise.allSettled(
-        [bootstrapWorkspace, codexHome]
+        [bootstrapWorkspace, persistentCredentialHome ? undefined : codexHome]
           .filter((path): path is string => path !== undefined)
           .map((path) => cleanupSdkDirectory(path)),
       );
@@ -1181,6 +1312,10 @@ export async function initialCredentialsAvailable(
   importer: typeof importAmbientAuth = importAmbientAuth,
 ): Promise<boolean> {
   if (environmentApiKey(environment) !== null) return false;
+  if (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome))) {
+    return false;
+  }
+  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   return await importer(ambientHome, isolatedHome);
 }
 
@@ -1671,6 +1806,7 @@ export function classifyConnectionFailure(
 export function scanRuntimeCodexConfig(
   config: JsonObject,
   stateDirectory: string,
+  protectedCredentialHome?: string,
 ): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
@@ -1688,6 +1824,9 @@ export function scanRuntimeCodexConfig(
           ":root": "read",
           ":workspace_roots": "write",
           [stateDirectory]: "write",
+          ...(protectedCredentialHome === undefined
+            ? {}
+            : { [protectedCredentialHome]: "read" }),
         },
       },
     },
