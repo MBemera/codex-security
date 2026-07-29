@@ -215,10 +215,11 @@ lifecycle diagnostics to stderr. Promptfoo-compatible `LOG_LEVEL=debug` also
 enables verbose output. If both environment variables are set,
 `CODEX_SECURITY_LOG_LEVEL` takes precedence; `--verbose` always enables verbose
 output. Diagnostics include CLI and runtime versions, the selected credential
-source, requested reasoning effort, prepared scan output, worker phases and
-capacity, classified connection retries, redacted scan warnings, cost updates,
-completion, and runtime cleanup. API keys, tokens, and raw provider messages are
-not printed. Use `--verbose --json` or
+source, effective model and reasoning effort, prepared scan output, worker
+phases and capacity, classified connection retries, redacted scan warnings,
+cost updates, input, cached-input, cache-write, and output token counts,
+completion, and runtime cleanup. API keys, authentication tokens, and raw
+provider messages are not printed. Use `--verbose --json` or
 `CODEX_SECURITY_LOG_LEVEL=debug` with `--json` in CI to capture diagnostics
 without changing the JSON scan result on stdout, or `--verbose --dry-run` to
 inspect unverified local scan configuration without starting Codex.

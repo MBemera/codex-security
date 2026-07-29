@@ -55,7 +55,9 @@ CODEX_SECURITY_LOG_LEVEL=debug npx @openai/codex-security scan .
 
 Promptfoo-compatible `LOG_LEVEL=debug` also enables verbose diagnostics.
 `CODEX_SECURITY_LOG_LEVEL` takes precedence; `--verbose` always enables logging.
-Structured JSON results remain on stdout.
+Structured JSON results remain on stdout. Diagnostics may include token counts
+and estimated cost; API keys, authentication tokens, and raw provider messages
+remain redacted.
 
 ## TypeScript SDK
 

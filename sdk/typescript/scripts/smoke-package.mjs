@@ -212,6 +212,12 @@ try {
   );
   assert.equal(installedManifest.name, packageManifest.name);
   assert.equal(installedManifest.version, packageManifest.version);
+  const installedReadme = await readFile(
+    join(installedRoot, "README.md"),
+    "utf8",
+  );
+  assert.match(installedReadme, /\bauthentication tokens\b/u);
+  assert.match(installedReadme, /\btoken counts\b/u);
 
   assert.deepEqual(
     await pluginFiles(join(installedRoot, "_bundled_plugin")),
