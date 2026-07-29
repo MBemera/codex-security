@@ -29,6 +29,16 @@ const appArmorRestrictsUserNamespaces = (() => {
     return false;
   }
 })();
+const usesCodexSecurityAppArmorProfile = (() => {
+  try {
+    return (
+      readFileSync("/proc/self/attr/current", "utf8").trim() ===
+      "codex-security-container (enforce)"
+    );
+  } catch {
+    return false;
+  }
+})();
 
 async function runEntrypoint(
   args: readonly string[],
@@ -63,7 +73,7 @@ async function runEntrypoint(
 
 describe("customer container entrypoint", () => {
   testPosix(
-    "preserves CSV scan arguments and selects Landlock only when AppArmor requires it",
+    "preserves CSV scan arguments and selects Landlock only without the AppArmor profile",
     async () => {
       const result = await runEntrypoint([
         "bulk-scan",
@@ -84,7 +94,8 @@ describe("customer container entrypoint", () => {
           "/output",
           "--workers",
           "2",
-          ...(appArmorRestrictsUserNamespaces
+          ...(appArmorRestrictsUserNamespaces &&
+          !usesCodexSecurityAppArmorProfile
             ? ["--codex", "features.use_legacy_landlock=true"]
             : []),
           "",

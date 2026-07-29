@@ -65,7 +65,7 @@ configuration:
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.0
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.1
 docker compose pull codex-security
 docker compose run --rm codex-security login --device-auth
 docker compose run --rm codex-security
@@ -75,5 +75,18 @@ Reports and resumable scan results are written to `results/`; the reusable
 device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
 or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
 GitHub repositories.
+
+On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
+can install the optional, narrowly scoped AppArmor profile once:
+
+```bash
+sudo install -m 0644 docker/codex-security.apparmor /etc/apparmor.d/codex-security-container
+sudo apparmor_parser -r -W /etc/apparmor.d/codex-security-container
+docker compose -f compose.yaml -f compose.apparmor.yaml run --rm codex-security
+```
+
+The override preserves the nonroot user, dropped capabilities, no-new-privileges,
+and hardened seccomp policy. Other Docker hosts do not need the profile or
+override.
 
 For installation, authentication, scan options, and CI setup, see the [official documentation](http://learn.chatgpt.com/docs/security/cli).

@@ -16,7 +16,13 @@ if [ "${1:-}" = bulk-scan ]; then
                 IFS= read -r restricted_user_namespaces < /proc/sys/kernel/apparmor_restrict_unprivileged_userns ||
                     true
                 if [ "$restricted_user_namespaces" = 1 ]; then
-                    set -- "$@" --codex features.use_legacy_landlock=true
+                    apparmor_profile=
+                    if [ -r /proc/self/attr/current ]; then
+                        IFS= read -r apparmor_profile < /proc/self/attr/current || true
+                    fi
+                    if [ "$apparmor_profile" != 'codex-security-container (enforce)' ]; then
+                        set -- "$@" --codex features.use_legacy_landlock=true
+                    fi
                 fi
             fi
             ;;

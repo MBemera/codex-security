@@ -8,6 +8,7 @@ on:
       - Dockerfile
       - Dockerfile.dockerignore
       - compose.yaml
+      - compose.apparmor.yaml
       - docker/**
       - sdk/typescript/**
   push:
@@ -92,10 +93,16 @@ jobs:
                 < /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
             fi
 
-            if [ "$restricted_user_namespaces" = 1 ]; then
+            apparmor_profile=
+            if [ -r /proc/self/attr/current ]; then
+              IFS= read -r apparmor_profile < /proc/self/attr/current || true
+            fi
+
+            if [ "$restricted_user_namespaces" = 1 ] &&
+              [ "$apparmor_profile" != "codex-security-container (enforce)" ]; then
               printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true
             elif printf "%s\\n" "$actual" | grep -Fxq features.use_legacy_landlock=true; then
-              printf "%s\\n" "Landlock must not be forced on an unrestricted host." >&2
+              printf "%s\\n" "Landlock must not be forced when the preferred sandbox is available." >&2
               exit 1
             fi
           '
@@ -143,7 +150,8 @@ jobs:
           mkdir -p results state
           chmod 700 results state
           printf 'id,repository,revision\n' > repositories.csv
-          export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          export CODEX_SECURITY_USER
           docker compose config --quiet
           docker compose run --rm codex-security --version
           if output="$(docker compose run --rm codex-security 2>&1)"; then
@@ -156,6 +164,61 @@ jobs:
             printf 'Unexpected empty-repository scan behavior:\n%s\n' "$output" >&2
             exit 1
           fi
+
+      - name: Verify optional hardened AppArmor Compose override
+        env:
+          CODEX_SECURITY_IMAGE: codex-security:release-candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          export CODEX_SECURITY_USER
+          compose=(docker compose -f compose.yaml -f compose.apparmor.yaml)
+
+          "${compose[@]}" config --format json |
+            jq --exit-status '
+              .services["codex-security"].security_opt as $options |
+              ($options | index("apparmor=codex-security-container")) != null and
+              ($options | index("no-new-privileges:true")) != null and
+              any($options[]; startswith("seccomp="))
+            ' > /dev/null
+
+          if ! docker info --format '{{json .SecurityOptions}}' |
+            grep -Fq '"name=apparmor"'; then
+            echo '::notice::This Docker host does not expose AppArmor; the default customer workflow remains available.'
+            exit 0
+          fi
+
+          sudo install -m 0644 docker/codex-security.apparmor \
+            /etc/apparmor.d/codex-security-container
+          sudo apparmor_parser -r -W /etc/apparmor.d/codex-security-container
+          sudo grep -Fxq 'codex-security-container (enforce)' \
+            /sys/kernel/security/apparmor/profiles
+
+          # The single-quoted program is evaluated inside the customer container.
+          # shellcheck disable=SC2016
+          "${compose[@]}" run --rm --entrypoint /bin/sh codex-security -ec '
+            test "$(cat /proc/self/attr/current)" = "codex-security-container (enforce)"
+            command_directory="$(mktemp -d)"
+            trap '\''rm -rf "$command_directory"'\'' EXIT
+            printf "%s\\n" "#!/bin/sh" '\''printf "%s\\n" "$@"'\'' \
+              > "$command_directory/codex-security"
+            chmod 755 "$command_directory/codex-security"
+            actual="$(
+              PATH="$command_directory:$PATH" \
+                /usr/local/bin/codex-security-entrypoint \
+                bulk-scan /input/repositories.csv --output-dir /output
+            )"
+            if printf "%s\\n" "$actual" |
+              grep -Fxq features.use_legacy_landlock=true; then
+              printf "%s\\n" "The AppArmor profile must retain the preferred Codex sandbox." >&2
+              exit 1
+            fi
+          '
+
+          "${compose[@]}" run --rm --entrypoint node codex-security \
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js \
+            sandbox /usr/bin/true
 
   authorize:
     if: github.event_name != 'pull_request'
@@ -416,7 +479,8 @@ jobs:
           mkdir -p results state
           chmod 700 results state
           printf 'id,repository,revision\n' > repositories.csv
-          export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          export CODEX_SECURITY_USER
           docker compose config --quiet
           docker compose run --rm codex-security --version
           if output="$(docker compose run --rm codex-security 2>&1)"; then
