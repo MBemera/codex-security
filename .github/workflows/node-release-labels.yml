@@ -1,0 +1,65 @@
+name: node-release-labels
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  categorize:
+    if: github.repository == 'openai/codex-security'
+    name: categorize release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Categorize pull request without checking out its code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          case "$PR_TITLE" in
+            feat:* | feat\(*\):*)
+              label="enhancement"
+              ;;
+            fix:* | fix\(*\):*)
+              label="bug"
+              ;;
+            docs:* | docs\(*\):*)
+              label="documentation"
+              ;;
+            release:* | release\(*\):* | test:* | test\(*\):*)
+              label="skip-release-notes"
+              ;;
+            *)
+              echo "No automatic release-note category applies."
+              exit 0
+              ;;
+          esac
+
+          if [[ "$label" == "skip-release-notes" ]]; then
+            if ! gh api \
+              "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
+              --silent >/dev/null 2>&1; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/labels" \
+                -f name=skip-release-notes \
+                -f color=ededed \
+                -f description="Omit internal changes from generated release notes" \
+                --silent
+            fi
+          fi
+
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+            -f "labels[]=$label" \
+            --silent

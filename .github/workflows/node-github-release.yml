@@ -1,0 +1,207 @@
+name: node-github-release
+
+on:
+  workflow_run:
+    workflows: [node-release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable npm release tag
+        required: true
+        type: string
+      run_id:
+        description: Successful node-release run to use for backfill
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-github-release-${{ inputs.tag || github.event.workflow_run.head_branch || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success')
+    name: publish verified GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Resolve the successful protected release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          TRIGGER_TAG: ${{ github.event.workflow_run.head_branch }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${INPUT_TAG:-${TRIGGER_TAG:-}}"
+          release_run="${INPUT_RUN_ID:-${TRIGGER_RUN_ID:-}}"
+
+          if [[ ! "$release_tag" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2
+            exit 1
+          fi
+
+          release_sha="$(
+            gh api "repos/$GITHUB_REPOSITORY/commits/$release_tag" \
+              --jq '.sha'
+          )"
+
+          if [[ -z "$release_run" ]]; then
+            release_run="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow node-release.yml \
+                --commit "$release_sha" \
+                --limit 20 \
+                --json databaseId,status,conclusion \
+                --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId' |
+                head -n 1
+            )"
+          fi
+
+          if [[ ! "$release_run" =~ ^[0-9]+$ ]]; then
+            echo "No successful protected npm release exists for $release_tag." >&2
+            exit 1
+          fi
+
+          run_fields="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$release_run" \
+              --jq '[.name, .status, .conclusion, .head_sha, .head_branch] | @tsv'
+          )"
+          IFS=$'\t' read -r run_name run_status run_conclusion run_sha run_tag <<< "$run_fields"
+
+          if [[ "$run_name" != "node-release" ||
+                "$run_status" != "completed" ||
+                "$run_conclusion" != "success" ||
+                "$run_sha" != "$release_sha" ||
+                "$run_tag" != "$release_tag" ]]; then
+            echo "The release run must successfully publish the exact tagged commit." >&2
+            exit 1
+          fi
+
+          {
+            printf 'tag=%s\n' "$release_tag"
+            printf 'version=%s\n' "${release_tag#npm-v}"
+            printf 'sha=%s\n' "$release_sha"
+            printf 'run-id=%s\n' "$release_run"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the verified npm release artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.release.outputs.run-id }}
+        run: |
+          set -euo pipefail
+          gh run download "$RELEASE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name npm-release-tarball \
+            --dir dist
+
+      - name: Verify the public npm package and provenance
+        id: artifact
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          archives=(dist/*.tgz)
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected exactly one verified npm release tarball." >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+
+          metadata="$(
+            npm view "@openai/codex-security@$RELEASE_VERSION" \
+              name version gitHead dist.integrity dist.attestations \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"
+
+          printf '%s\n' "$metadata" |
+            node sdk/typescript/scripts/release-automation.mjs \
+              verify-publication "$archive" "$RELEASE_VERSION" "$RELEASE_SHA"
+
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release and generated notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_ARCHIVE: ${{ steps.artifact.outputs.archive }}
+        run: |
+          set -euo pipefail
+
+          if existing_release="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              2>/dev/null
+          )"; then
+            printf '%s\n' "$existing_release" |
+              node sdk/typescript/scripts/release-automation.mjs \
+                verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG"
+            echo "The verified GitHub Release already exists."
+            exit 0
+          fi
+
+          previous_tag=""
+          if git rev-parse "$RELEASE_SHA^" >/dev/null 2>&1; then
+            while IFS= read -r candidate; do
+              if [[ "$candidate" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                previous_tag="$candidate"
+                break
+              fi
+            done < <(
+              git tag --merged "$RELEASE_SHA^" \
+                --list 'npm-v*' \
+                --sort=-version:refname
+            )
+          fi
+
+          release_args=(
+            "$RELEASE_TAG"
+            "$RELEASE_ARCHIVE"
+            --repo "$GITHUB_REPOSITORY"
+            --title "Codex Security $RELEASE_VERSION"
+            --verify-tag
+            --generate-notes
+            --latest
+          )
+          if [[ -n "$previous_tag" ]]; then
+            release_args+=(--notes-start-tag "$previous_tag")
+          fi
+
+          gh release create "${release_args[@]}"
