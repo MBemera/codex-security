@@ -1051,7 +1051,7 @@ describe("GitHub release workflow safeguards", () => {
     );
     const mocks = [
       "git() { return 0; }",
-      "npm() { printf '%s\\n' '[\"0.1.1\",\"2.0.0\"]'; }",
+      "npm() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
     const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
@@ -1085,9 +1085,15 @@ describe("GitHub release workflow safeguards", () => {
       protectedReleaseWorkflow,
       "Validate release tag",
     );
+    const checkedOutVersion = releaseVersion(
+      JSON.parse(
+        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+      ) as ReleaseMetadata,
+    );
+    const checkedOutTag = `npm-v${checkedOutVersion}`;
     const mocks = [
       "git() { return 0; }",
-      "sfw() { printf '%s\\n' '[\"0.1.1\",\"2.0.0\"]'; }",
+      "sfw() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
     const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
@@ -1095,8 +1101,8 @@ describe("GitHub release workflow safeguards", () => {
       env: {
         ...process.env,
         GITHUB_OUTPUT: "/dev/null",
-        GITHUB_REF: "refs/tags/npm-v0.1.2",
-        GITHUB_REF_NAME: "npm-v0.1.2",
+        GITHUB_REF: `refs/tags/${checkedOutTag}`,
+        GITHUB_REF_NAME: checkedOutTag,
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
