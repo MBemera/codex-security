@@ -294,6 +294,10 @@ describe("CLI", () => {
     ]) {
       expect(readme).toContain(setting);
     }
+    expect(readme).toMatch(
+      /\|\s*`CODEX_SECURITY_LOG_LEVEL`\s*\|\s*CLI-only\b/u,
+    );
+    expect(readme).toMatch(/\|\s*`LOG_LEVEL`\s*\|\s*CLI-only\b/u);
   });
 
   test("keeps documented runtime and deep-scan defaults accurate", async () => {
@@ -2437,6 +2441,80 @@ describe("CLI", () => {
     expect(scanStarted).toBe(false);
   });
 
+  test("reports selected profile configuration consistently in verbose dry runs", async () => {
+    const scenarios = [
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-sol"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="high"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "high",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "low",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="medium"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "medium",
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--dry-run",
+            "--verbose",
+            "--json",
+            ...scenario.overrides.flatMap((override) => ["--codex", override]),
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({
+        dryRun: true,
+        ...fakePreflight("."),
+        model: scenario.model,
+        reasoningEffort: scenario.reasoningEffort,
+      });
+
+      for (const event of ["scan.configuration", "scan.preflight.completed"]) {
+        const diagnostic = stderr
+          .text()
+          .split("\n")
+          .find((line) => line.startsWith(`codex-security: debug: ${event}`));
+
+        expect(diagnostic).toBeDefined();
+        expect(diagnostic).toContain(`model=${JSON.stringify(scenario.model)}`);
+        expect(diagnostic).toContain(
+          `reasoning_effort=${JSON.stringify(scenario.reasoningEffort)}`,
+        );
+      }
+    }
+  });
+
   test("redacts verbose provider failures and excludes private provider context", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -2468,6 +2546,90 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("org-private");
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
     expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
+  });
+
+  test("excludes unclassified provider context from verbose failure diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          "Provider failed for tenant=tenant-private request_id=req-internal",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+
+    const failureDiagnostic = stderr
+      .text()
+      .split("\n")
+      .find((line) => line.startsWith("codex-security: debug: scan.failed"));
+
+    expect(failureDiagnostic).toBeDefined();
+    expect(failureDiagnostic).toContain('classification="unknown"');
+    expect(failureDiagnostic).toContain("partial_output=false");
+    expect(failureDiagnostic).not.toContain("tenant-private");
+    expect(failureDiagnostic).not.toContain("req-internal");
+    expect(stderr.text()).toContain("tenant=tenant-private");
+    expect(stdout.text()).toBe("");
+  });
+
+  test("prevents Unicode line separators from forging verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const separators = "\u0085\u2028\u2029";
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onOutputDirReady?.(
+          `/tmp/scan${separators}codex-security: debug: forged`,
+        );
+        options?.onWarning?.(
+          `Scanner warning${separators}codex-security: debug: forged`,
+        );
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).not.toMatch(/[\u0085\u2028\u2029]/u);
+
+    const diagnostics = stderr
+      .text()
+      .split("\n")
+      .filter((line) => line.startsWith("codex-security: debug:"));
+
+    expect(diagnostics.some((line) => line.includes("scan.output_ready"))).toBe(
+      true,
+    );
+    expect(diagnostics.some((line) => line.includes("scan.warning"))).toBe(
+      true,
+    );
+    for (const diagnostic of diagnostics) {
+      expect(diagnostic).not.toMatch(/[\u0085\u2028\u2029]/u);
+      expect(diagnostic).not.toMatch(/^codex-security: debug: forged$/u);
+    }
   });
 
   test("redacts verbose output paths and observer diagnostics", async () => {
@@ -2512,6 +2674,84 @@ describe("CLI", () => {
     );
     expect(stderr.text()).toContain("[redacted]");
     expect(stderr.text()).not.toContain("SYNTHETIC");
+  });
+
+  test("excludes observer failure context from verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error(
+            "Observer failed for tenant=tenant-private request_id=req-internal",
+          ),
+        );
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+
+    const observerDiagnostic = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.observer_failed"),
+      );
+
+    expect(observerDiagnostic).toBeDefined();
+    expect(observerDiagnostic).toContain('observer="onWorkerStatus"');
+    expect(observerDiagnostic).toContain('classification="unknown"');
+    expect(observerDiagnostic).not.toContain("tenant-private");
+    expect(observerDiagnostic).not.toContain("req-internal");
+    expect(stderr.text()).toContain("tenant=tenant-private");
+  });
+
+  test("excludes cleanup failure context from verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onClose: () => {
+            throw new Error(
+              "Cleanup failed for tenant=tenant-private request_id=req-internal",
+            );
+          },
+        }),
+      ),
+    ).toBe(2);
+
+    for (const event of ["runtime.cleanup.failed", "scan.failed"]) {
+      const diagnostic = stderr
+        .text()
+        .split("\n")
+        .find((line) => line.startsWith(`codex-security: debug: ${event}`));
+
+      expect(diagnostic).toBeDefined();
+      expect(diagnostic).toContain('classification="unknown"');
+      expect(diagnostic).not.toContain("tenant-private");
+      expect(diagnostic).not.toContain("req-internal");
+    }
+
+    expect(stderr.text()).toContain("tenant=tenant-private");
+    expect(stdout.text()).toBe("");
   });
 
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {

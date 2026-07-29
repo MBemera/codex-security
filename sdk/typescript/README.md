@@ -325,21 +325,22 @@ values.
 
 ### Environment variables
 
-The CLI and SDK recognize the following user-configurable environment:
+The CLI and SDK recognize the following user-configurable environment;
+diagnostic log levels apply to the CLI only:
 
-| Variable                                                                    | Effect                                                                                        |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | Set to `debug` to enable redacted scan diagnostics; takes precedence over `LOG_LEVEL`.        |
-| `LOG_LEVEL`                                                                 | Promptfoo-compatible fallback; set to `debug` when the product-specific level is unset.       |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
-| `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
-| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
-| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                             |
-| `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
-| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
+| Variable                                                                    | Effect                                                                                           |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                                |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics; takes precedence over `LOG_LEVEL`.            |
+| `LOG_LEVEL`                                                                 | CLI-only Promptfoo-compatible fallback; set to `debug` when the product-specific level is unset. |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                    |
+| `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`.    |
+| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                      |
+| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                        |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                              |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                                |
+| `CI`                                                                        | Disable interactive update notices in automated environments.                                    |
+| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                   |
 
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
 the managed Codex runtime, and finally `python3` or `python` from `PATH`.

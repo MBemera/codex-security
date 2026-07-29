@@ -2323,6 +2323,13 @@ async function runExport(
 
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
+function sanitizeDiagnosticValue(value: unknown): string {
+  return cliErrorMessage(value).replaceAll(
+    /[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu,
+    " ",
+  );
+}
+
 function writeVerboseDiagnostic(
   output: Writable,
   event: string,
@@ -2331,9 +2338,7 @@ function writeVerboseDiagnostic(
   const attributes = Object.entries(fields).flatMap(([name, value]) => {
     if (value === undefined) return [];
     const safe =
-      typeof value === "string"
-        ? cliErrorMessage(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ")
-        : value;
+      typeof value === "string" ? sanitizeDiagnosticValue(value) : value;
     return [`${name}=${JSON.stringify(safe)}`];
   });
   output.write(
@@ -2417,6 +2422,9 @@ async function runScan(
     null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
+  let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
+  let effectiveReasoningEffort =
+    DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let selectedAuthentication: ScanAuthentication | null = null;
   let failed = false;
   let failure: unknown;
@@ -2456,11 +2464,11 @@ async function runScan(
       typeof profileReasoningEffort === "string"
         ? profileReasoningEffort
         : config.codexOverrides?.["model_reasoning_effort"];
-    const effectiveModel =
+    effectiveModel =
       typeof configuredModel === "string"
         ? configuredModel
         : arguments_.model ?? DEFAULT_SCAN_MODEL_CONFIGURATION.model;
-    const effectiveReasoningEffort =
+    effectiveReasoningEffort =
       typeof configuredReasoningEffort === "string"
         ? configuredReasoningEffort
         : arguments_.effort ?? DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
@@ -2660,20 +2668,19 @@ async function runScan(
       },
       onWarning: (warning) => {
         writeAboveProgress(() => {
-          diagnostic("scan.warning", { message: cliErrorMessage(warning) });
-          errorOutput.write(
-            `codex-security: warning: ${cliErrorMessage(warning)}\n`,
-          );
+          const message = sanitizeDiagnosticValue(warning);
+          diagnostic("scan.warning", { message });
+          errorOutput.write(`codex-security: warning: ${message}\n`);
         });
       },
       onObserverError: (observer, error) => {
         writeAboveProgress(() => {
           diagnostic("scan.observer_failed", {
             observer,
-            message: cliErrorMessage(error),
+            classification: classifyConnectionFailure(error),
           });
           errorOutput.write(
-            `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
+            `codex-security: warning: ${observer} observer failed: ${sanitizeDiagnosticValue(error)}\n`,
           );
         });
       },
@@ -2696,7 +2703,7 @@ async function runScan(
         () => diagnostic("runtime.cleanup.completed"),
         (error: unknown) => {
           diagnostic("runtime.cleanup.failed", {
-            message: cliErrorMessage(error),
+            classification: classifyConnectionFailure(error),
           });
           if (!failed) {
             failed = true;
@@ -2728,7 +2735,6 @@ async function runScan(
         : scanFailureMessage(failure, selectedAuthentication);
     diagnostic("scan.failed", {
       classification: classifyConnectionFailure(failure),
-      message,
       partial_output: scanDir !== null,
     });
     if (failure instanceof OutputInsideProtectedRootError) {
@@ -2747,18 +2753,23 @@ async function runScan(
     return { exitCode: 2, error: message };
   }
   if (preflight !== null) {
+    const effectivePreflight: ScanPreflight = {
+      ...preflight,
+      model: effectiveModel,
+      reasoningEffort: effectiveReasoningEffort,
+    };
     progress?.stage("Preflight complete");
     diagnostic("scan.preflight.completed", {
-      model: preflight.model,
-      reasoning_effort: preflight.reasoningEffort,
-      method: preflight.authentication.method,
+      model: effectivePreflight.model,
+      reasoning_effort: effectivePreflight.reasoningEffort,
+      method: effectivePreflight.authentication.method,
       source:
-        preflight.authentication.method === "api_key"
-          ? preflight.authentication.source
+        effectivePreflight.authentication.method === "api_key"
+          ? effectivePreflight.authentication.source
           : undefined,
-      verified: preflight.authentication.verified,
+      verified: effectivePreflight.authentication.verified,
     });
-    return { exitCode: 0, data: { dryRun: true, ...preflight } };
+    return { exitCode: 0, data: { dryRun: true, ...effectivePreflight } };
   }
   if (result === null) {
     diagnostic("scan.failed", {
