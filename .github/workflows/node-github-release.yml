@@ -99,23 +99,42 @@ jobs:
             exit 1
           fi
 
-          if ! tag_object="$(
+          if ! tag_ref="$(
             gh api \
               "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" \
-              --jq '.object.sha'
+              --jq '[.object.type, .object.sha] | @tsv'
           )"; then
             echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2
             exit 1
           fi
 
+          IFS=$'\t' read -r tag_type tag_object <<< "$tag_ref"
           if [[ ! "$tag_object" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "GitHub releases require a valid Git tag object." >&2
             exit 1
           fi
 
-          if ! release_sha="$(
-            git rev-parse --verify "${tag_object}^{commit}" 2>/dev/null
-          )"; then
+          case "$tag_type" in
+            commit)
+              release_sha="$tag_object"
+              ;;
+            tag)
+              if ! release_sha="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                  --jq 'if .object.type == "commit" then .object.sha else empty end'
+              )"; then
+                echo "GitHub releases require a tag pointing to a commit." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "GitHub releases require a tag pointing to a commit." >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$release_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "GitHub releases require a tag pointing to a commit." >&2
             exit 1
           fi
@@ -422,7 +441,6 @@ jobs:
               printf '%s\n' "$generated_notes" |
                 gh release edit "$RELEASE_TAG" \
                   --repo "$GITHUB_REPOSITORY" \
-                  --verify-tag \
                   --notes-file -
               echo "Updated existing GitHub Release with generated notes."
             else

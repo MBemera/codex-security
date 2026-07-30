@@ -210,6 +210,7 @@ type SignatureAuditFixture = {
   workflowRef?: string;
   sourceCommit?: string;
   runId?: string;
+  attempt?: string;
   builder?: string;
 };
 
@@ -264,7 +265,7 @@ function signatureAudit(options: SignatureAuditFixture = {}): ReleaseMetadata {
         metadata: {
           invocationId:
             `https://github.com/${repository}/actions/runs/` +
-            `${options.runId ?? releaseRun}/attempts/1`,
+            `${options.runId ?? releaseRun}/attempts/${options.attempt ?? "1"}`,
         },
       },
     },
@@ -735,6 +736,30 @@ describe("cryptographically verified npm provenance", () => {
       sha512,
     });
   });
+
+  test.each(["", "0", "01", "not-a-number", "1/extra", "1?attempt=2"])(
+    "rejects the malformed protected workflow run attempt %j",
+    (attempt) => {
+      expect(() =>
+        verifySignatureAudit(
+          signatureAudit({ attempt }),
+          archive,
+          signatureExpected(),
+        ),
+      ).toThrow(
+        "Verified SLSA provenance must identify the successful release run.",
+      );
+      expect(() =>
+        verifyRecoveredSignatureAudit(signatureAudit({ attempt }), archive, {
+          version: "0.1.2",
+          gitHead: releaseCommit,
+          repository: releaseRepository,
+        }),
+      ).toThrow(
+        "Verified SLSA provenance must identify the protected release run.",
+      );
+    },
+  );
 
   test("rejects a recovered archive whose certificate identifies another run", () => {
     expect(() =>
@@ -1607,14 +1632,15 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test.each([
-    { kind: "lightweight", objectSha: releaseCommit },
+    { kind: "lightweight", tagType: "commit", objectSha: releaseCommit },
     {
-      kind: "annotated",
+      kind: "annotated with no locally fetched tag object",
+      tagType: "tag",
       objectSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     },
   ])(
     "resolves the exact $kind tag when a same-named branch exists",
-    ({ objectSha }) => {
+    ({ tagType, objectSha }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Resolve the successful protected release",
@@ -1623,6 +1649,7 @@ describe("GitHub release workflow safeguards", () => {
       const mocks = [
         "git() {",
         `  if [[ "$1" != "rev-parse" || "$2" != "--verify" || "$3" != "${objectSha}^{commit}" ]]; then return 66; fi`,
+        '  if [[ "$MOCK_TAG_TYPE" == "tag" ]]; then return 67; fi',
         `  printf '%s\\n' '${releaseCommit}'`,
         "}",
         "gh() {",
@@ -1630,7 +1657,14 @@ describe("GitHub release workflow safeguards", () => {
         "  shift",
         '  case "$1" in',
         '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
-        `      printf '%s\\n' '${objectSha}'`,
+        '      if [[ "$3" == ".object.sha" ]]; then',
+        `        printf '%s\\n' '${objectSha}'`,
+        "      else",
+        `        printf '%s\\t%s\\n' '${tagType}' '${objectSha}'`,
+        "      fi",
+        "      ;;",
+        `    "repos/openai/codex-security/git/tags/${objectSha}")`,
+        `      printf '%s\\n' '${releaseCommit}'`,
         "      ;;",
         '    "repos/openai/codex-security/commits/npm-v0.1.2")',
         `      printf '%s\\n' '${branchCommit}'`,
@@ -1650,6 +1684,7 @@ describe("GitHub release workflow safeguards", () => {
           GITHUB_REPOSITORY: "openai/codex-security",
           INPUT_RUN_ID: releaseRun,
           INPUT_TAG: "npm-v0.1.2",
+          MOCK_TAG_TYPE: tagType,
           TRIGGER_RUN_ID: "",
           TRIGGER_TAG: "",
         },
@@ -1877,6 +1912,13 @@ describe("GitHub release workflow safeguards", () => {
         "        printf '%s\\n' 'verified archive' > \"$destination/$pattern\"",
         "        ;;",
         "      edit)",
+        "        shift",
+        '        for argument in "$@"; do',
+        '          if [[ "$argument" == "--verify-tag" ]]; then',
+        "            printf '%s\\n' 'unknown flag: --verify-tag' >&2",
+        "            return 67",
+        "          fi",
+        "        done",
         "        printf '%s: ' 'updated release notes'",
         "        cat",
         "        ;;",

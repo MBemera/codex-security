@@ -554,9 +554,11 @@ export function verifySignatureAudit(report, archive, expected) {
     );
   }
   const invocation = statement.predicate?.runDetails?.metadata?.invocationId;
+  const invocationPrefix = `${repository}/actions/runs/${runId}/attempts/`;
   if (
     typeof invocation !== "string" ||
-    !invocation.startsWith(`${repository}/actions/runs/${runId}/attempts/`)
+    !invocation.startsWith(invocationPrefix) ||
+    !/^[1-9][0-9]*$/u.test(invocation.slice(invocationPrefix.length))
   ) {
     throw new Error(
       "Verified SLSA provenance must identify the successful release run.",
