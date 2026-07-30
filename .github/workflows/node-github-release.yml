@@ -482,16 +482,38 @@ jobs:
 
             latest_query_status=0
             latest_response="$(
-              gh api "repos/$GITHUB_REPOSITORY/releases/latest" 2>/dev/null
+              gh api --include \
+                "repos/$GITHUB_REPOSITORY/releases/latest" 2>/dev/null
             )" || latest_query_status=$?
             current_latest_tag="$(
               printf '%s\n' "$latest_response" |
                 CODEX_SECURITY_LATEST_QUERY_STATUS="$latest_query_status" \
                   node --input-type=module --eval '
                     import { readFileSync } from "node:fs";
-                    const response = JSON.parse(readFileSync(0, "utf8"));
+                    const raw = readFileSync(0, "utf8");
+                    const separator = raw.search(/\r?\n\r?\n/u);
+                    const status = /^HTTP\/\d+(?:\.\d+)?\s+(\d{3})(?:\s|$)/u.exec(
+                      raw.slice(0, separator),
+                    );
+                    if (separator < 0 || status == null) {
+                      throw new Error(
+                        "Unable to resolve the current Latest GitHub Release.",
+                      );
+                    }
+                    let response;
+                    try {
+                      response = JSON.parse(
+                        raw.slice(separator + (raw[separator] === "\r" ? 4 : 2)),
+                      );
+                    } catch {
+                      throw new Error(
+                        "Unable to resolve the current Latest GitHub Release.",
+                      );
+                    }
                     if (process.env.CODEX_SECURITY_LATEST_QUERY_STATUS === "0") {
                       if (
+                        Number(status[1]) < 200 ||
+                        Number(status[1]) >= 300 ||
                         typeof response.tag_name !== "string" ||
                         response.tag_name.length === 0
                       ) {
@@ -500,7 +522,7 @@ jobs:
                         );
                       }
                       process.stdout.write(response.tag_name);
-                    } else if (String(response?.status) !== "404") {
+                    } else if (status[1] !== "404") {
                       throw new Error(
                         "Unable to resolve the current Latest GitHub Release.",
                       );

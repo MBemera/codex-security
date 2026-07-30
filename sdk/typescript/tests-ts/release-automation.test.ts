@@ -1295,6 +1295,11 @@ describe("GitHub release workflow safeguards", () => {
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF"');
   });
 
+  test("pins both supported-minimum verification and protected signing runtimes", () => {
+    expect(protectedReleaseWorkflow).toContain('node-version: "22.13.0"');
+    expect(protectedReleaseWorkflow).toContain('node-version: "24.15.0"');
+  });
+
   test("restricts release cuts to main and increasing stable versions", () => {
     expect(releaseCutWorkflow).toMatch(
       /- name: Set up Node\.js\n(?:[^\n]*\n)*?\s+node-version: "24\.15\.0"/u,
@@ -2206,6 +2211,31 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description:
+        "already current when the Latest lookup has no HTTP response",
+      existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "__network__",
+      makeLatest: true,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "already current when the Latest 404 response is malformed",
+      existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "__malformed_missing__",
+      makeLatest: true,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description:
         "already current on a historical release incorrectly marked Latest",
       existingNotes: "Generated release notes",
       updated: false,
@@ -2263,6 +2293,11 @@ describe("GitHub release workflow safeguards", () => {
         '  if [[ "$1" == "api" ]]; then',
         "    shift",
         "    local method=GET",
+        "    local include=false",
+        '    if [[ "${1:-}" == "--include" ]]; then',
+        "      include=true",
+        "      shift",
+        "    fi",
         '    if [[ "${1:-}" == "--method" ]]; then',
         '      method="$2"',
         "      shift 2",
@@ -2272,15 +2307,21 @@ describe("GitHub release workflow safeguards", () => {
         '        printf \'{"tag_name":"npm-v0.1.2","draft":false,"prerelease":false,"body":"%s","assets":[]}\\n\' "$MOCK_EXISTING_NOTES"',
         "        ;;",
         '      "GET repos/test/codex-security/releases/latest")',
+        '        if [[ "$include" != "true" ]]; then return 71; fi',
         '        if [[ "$MOCK_LATEST_TAG" == "__missing__" ]]; then',
-        '          printf \'%s\\n\' \'{"message":"Not Found","status":"404"}\'',
+        "          printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' '{\"message\":\"Not Found\"}'",
         "          return 1",
         "        fi",
         '        if [[ "$MOCK_LATEST_TAG" == "__error__" ]]; then',
-        '          printf \'%s\\n\' \'{"message":"Unavailable","status":"500"}\'',
+        "          printf '%s\\n' 'HTTP/2.0 500 Internal Server Error' 'content-type: application/json' '' '{\"message\":\"Unavailable\"}'",
         "          return 1",
         "        fi",
-        '        printf \'{"tag_name":"%s"}\\n\' "$MOCK_LATEST_TAG"',
+        '        if [[ "$MOCK_LATEST_TAG" == "__network__" ]]; then return 1; fi',
+        '        if [[ "$MOCK_LATEST_TAG" == "__malformed_missing__" ]]; then',
+        "          printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' 'not-json'",
+        "          return 1",
+        "        fi",
+        '        printf \'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{"tag_name":"%s"}\\n\' "$MOCK_LATEST_TAG"',
         "        ;;",
         '      "GET repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
         '        printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
@@ -2370,8 +2411,13 @@ describe("GitHub release workflow safeguards", () => {
       expect(result.status).toBe(status);
       expect(result.stdout).toContain("verified existing GitHub release asset");
       if (status !== 0) {
+        const latestLookupFailed = [
+          "__error__",
+          "__network__",
+          "__malformed_missing__",
+        ].includes(latestTag);
         expect(result.stderr).toContain(
-          latestTag === "__error__"
+          latestLookupFailed
             ? "Unable to resolve the current Latest GitHub Release."
             : "GitHub release tag must still point to the verified commit.",
         );
