@@ -1296,6 +1296,9 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test("restricts release cuts to main and increasing stable versions", () => {
+    expect(releaseCutWorkflow).toMatch(
+      /- name: Set up Node\.js\n(?:[^\n]*\n)*?\s+node-version: "24\.15\.0"/u,
+    );
     expect(releaseCutWorkflow).toContain(
       'if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then',
     );
@@ -2178,6 +2181,30 @@ describe("GitHub release workflow safeguards", () => {
       status: 0,
     },
     {
+      description: "already current when no GitHub release is marked Latest",
+      existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "__missing__",
+      makeLatest: true,
+      latestUpdated: true,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description: "already current when the Latest lookup fails unexpectedly",
+      existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "__error__",
+      makeLatest: true,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
       description:
         "already current on a historical release incorrectly marked Latest",
       existingNotes: "Generated release notes",
@@ -2245,7 +2272,15 @@ describe("GitHub release workflow safeguards", () => {
         '        printf \'{"tag_name":"npm-v0.1.2","draft":false,"prerelease":false,"body":"%s","assets":[]}\\n\' "$MOCK_EXISTING_NOTES"',
         "        ;;",
         '      "GET repos/test/codex-security/releases/latest")',
-        "        printf '%s\\n' \"$MOCK_LATEST_TAG\"",
+        '        if [[ "$MOCK_LATEST_TAG" == "__missing__" ]]; then',
+        '          printf \'%s\\n\' \'{"message":"Not Found","status":"404"}\'',
+        "          return 1",
+        "        fi",
+        '        if [[ "$MOCK_LATEST_TAG" == "__error__" ]]; then',
+        '          printf \'%s\\n\' \'{"message":"Unavailable","status":"500"}\'',
+        "          return 1",
+        "        fi",
+        '        printf \'{"tag_name":"%s"}\\n\' "$MOCK_LATEST_TAG"',
         "        ;;",
         '      "GET repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
         '        printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
@@ -2336,7 +2371,9 @@ describe("GitHub release workflow safeguards", () => {
       expect(result.stdout).toContain("verified existing GitHub release asset");
       if (status !== 0) {
         expect(result.stderr).toContain(
-          "GitHub release tag must still point to the verified commit.",
+          latestTag === "__error__"
+            ? "Unable to resolve the current Latest GitHub Release."
+            : "GitHub release tag must still point to the verified commit.",
         );
         return;
       }
@@ -2402,13 +2439,16 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test.each([
-    { title: "fix: retitle an internal change" },
-    { title: "feat: retitle an internal change" },
-    { title: "docs: retitle an internal change" },
-    { title: "chore: retitle an internal change" },
+    { title: "fix: retitle an internal change", expectedLabel: "bug" },
+    { title: "feat: retitle an internal change", expectedLabel: "enhancement" },
+    {
+      title: "docs: retitle an internal change",
+      expectedLabel: "documentation",
+    },
+    { title: "chore: retitle an internal change", expectedLabel: null },
   ])(
-    "preserves a manually excluded release after retitling to $title",
-    ({ title }) => {
+    "preserves a manually excluded release and reconciles its category after retitling to $title",
+    ({ title, expectedLabel }) => {
       const script = workflowStepShell(
         releaseLabelsWorkflow,
         "Categorize pull request without checking out its code",
@@ -2434,13 +2474,15 @@ describe("GitHub release workflow safeguards", () => {
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
         "      printf '%s\\n' 'github-actions[bot]' 'trusted-reviewer'",
         "      ;;",
-        '    "DELETE repos/test/codex-security/issues/17/labels/enhancement" | "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
+        '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
+        "      printf '%s\\n' 'removed a stale managed category'",
+        "      ;;",
+        '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
         "      printf '%s\\n' 'removed a manually excluded release label'",
         "      return 70",
         "      ;;",
         '    "POST repos/test/codex-security/issues/17/labels")',
-        "      printf '%s\\n' 'overrode a manually excluded release'",
-        "      return 71",
+        "      printf '%s\\n' \"$@\"",
         "      ;;",
         "    *) return 65 ;;",
         "  esac",
@@ -2464,9 +2506,17 @@ describe("GitHub release workflow safeguards", () => {
       expect(result.stdout).not.toContain(
         "removed a manually excluded release label",
       );
-      expect(result.stdout).not.toContain(
-        "overrode a manually excluded release",
-      );
+      if (expectedLabel === "enhancement") {
+        expect(result.stdout).not.toContain("removed a stale managed category");
+        expect(result.stdout).not.toContain("labels[]=enhancement");
+      } else {
+        expect(result.stdout).toContain("removed a stale managed category");
+        if (expectedLabel === null) {
+          expect(result.stdout).not.toContain("labels[]=");
+        } else {
+          expect(result.stdout).toContain(`labels[]=${expectedLabel}`);
+        }
+      }
     },
   );
 
@@ -2504,6 +2554,9 @@ describe("GitHub release workflow safeguards", () => {
       "      printf '%s\\n' 'removed an unattributed release exclusion'",
       "      return 70",
       "      ;;",
+      '    "POST repos/test/codex-security/issues/17/labels")',
+      "      printf '%s\\n' \"$@\"",
+      "      ;;",
       "    *) return 65 ;;",
       "  esac",
       "}",
@@ -2523,6 +2576,7 @@ describe("GitHub release workflow safeguards", () => {
       "Preserving existing skip-release-notes label.",
     );
     expect(result.stdout).not.toContain("removed an unattributed release");
+    expect(result.stdout).toContain("labels[]=enhancement");
   });
 
   test.each([

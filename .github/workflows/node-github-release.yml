@@ -480,8 +480,32 @@ jobs:
                 '
             )"
 
+            latest_query_status=0
+            latest_response="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/latest" 2>/dev/null
+            )" || latest_query_status=$?
             current_latest_tag="$(
-              gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name'
+              printf '%s\n' "$latest_response" |
+                CODEX_SECURITY_LATEST_QUERY_STATUS="$latest_query_status" \
+                  node --input-type=module --eval '
+                    import { readFileSync } from "node:fs";
+                    const response = JSON.parse(readFileSync(0, "utf8"));
+                    if (process.env.CODEX_SECURITY_LATEST_QUERY_STATUS === "0") {
+                      if (
+                        typeof response.tag_name !== "string" ||
+                        response.tag_name.length === 0
+                      ) {
+                        throw new Error(
+                          "Unable to resolve the current Latest GitHub Release.",
+                        );
+                      }
+                      process.stdout.write(response.tag_name);
+                    } else if (String(response?.status) !== "404") {
+                      throw new Error(
+                        "Unable to resolve the current Latest GitHub Release.",
+                      );
+                    }
+                  '
             )"
             currently_latest=false
             if [[ "$current_latest_tag" == "$RELEASE_TAG" ]]; then
