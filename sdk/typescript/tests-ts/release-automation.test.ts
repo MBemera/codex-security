@@ -1,6 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
@@ -1269,6 +1277,77 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test.each([
+    {
+      kind: "existing lightweight tag",
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      kind: "existing annotated tag",
+      tagType: "tag",
+      tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      peeledCommit: releaseCommit,
+      status: 0,
+    },
+    {
+      kind: "retargeted annotated tag",
+      tagType: "tag",
+      tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      peeledCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      status: 1,
+    },
+  ])(
+    "resolves an $kind to its exact commit before cutting a release",
+    ({ tagType, tagObject, peeledCommit, status }) => {
+      const script = workflowStepShell(
+        releaseCutWorkflow,
+        "Create the exact merged release tag",
+      );
+      const mock = [
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  case "$1" in',
+        '    "repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
+        '      printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
+        "      ;;",
+        "    repos/test/codex-security/git/tags/*)",
+        "      printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
+        "      ;;",
+        "    *) return 65 ;;",
+        "  esac",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          GITHUB_SHA: releaseCommit,
+          MOCK_PEELED_COMMIT: peeledCommit,
+          MOCK_TAG_OBJECT: tagObject,
+          MOCK_TAG_TYPE: tagType,
+          RELEASE_TAG: "npm-v0.1.2",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(status);
+      if (status === 0) {
+        expect(result.stdout).toContain(
+          `Release tag npm-v0.1.2 already points to ${releaseCommit}.`,
+        );
+      } else {
+        expect(result.stderr).toContain(
+          "Release tag npm-v0.1.2 already points to a different commit.",
+        );
+      }
+    },
+  );
+
   test("enforces increasing versions inside the protected npm publisher", () => {
     expect(protectedReleaseWorkflow).toContain(
       "sfw npm view @openai/codex-security versions",
@@ -1618,6 +1697,131 @@ describe("GitHub release workflow safeguards", () => {
       'verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG"',
     );
   });
+
+  test.each([
+    {
+      description: "the exact successful publishing run",
+      exact: true,
+      recoveryConclusion: "skipped",
+      originalCommit: releaseCommit,
+      status: 0,
+      message: "Verified npm provenance for the resolved release run.",
+    },
+    {
+      description: "a different signing run without authenticated recovery",
+      exact: false,
+      recoveryConclusion: "skipped",
+      originalCommit: releaseCommit,
+      status: 1,
+      message:
+        "Signed npm provenance must identify the resolved successful release run.",
+    },
+    {
+      description: "the authenticated original signing run after recovery",
+      exact: false,
+      recoveryConclusion: "success",
+      originalCommit: releaseCommit,
+      status: 0,
+      message:
+        "Verified protected recovery provenance from its original signing run.",
+    },
+    {
+      description: "a recovery provenance run for a different source commit",
+      exact: false,
+      recoveryConclusion: "success",
+      originalCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      status: 1,
+      message:
+        "Recovered npm provenance must identify the exact protected release.",
+    },
+  ])(
+    "binds GitHub release provenance to $description",
+    ({ exact, recoveryConclusion, originalCommit, status, message }) => {
+      const script = workflowStepShell(
+        githubReleaseWorkflow,
+        "Verify the public npm package and signed provenance",
+      );
+      const workspace = mkdtempSync(
+        join(tmpdir(), "codex-security-release-provenance-"),
+      );
+      mkdirSync(join(workspace, "dist"));
+      writeFileSync(join(workspace, "dist", "release.tgz"), "verified archive");
+
+      try {
+        const mocks = [
+          "npm() {",
+          '  case "$1" in',
+          "    view) printf '%s\\n' '{}' ;;",
+          "    install) return 0 ;;",
+          "    audit) printf '%s\\n' '{\"verified\":[]}' ;;",
+          "    *) return 65 ;;",
+          "  esac",
+          "}",
+          "node() {",
+          '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" ]]; then',
+          '    case "$2" in',
+          "      verify-publication)",
+          "        printf '%s\\n' 'verified published artifact'",
+          "        ;;",
+          "      verify-provenance)",
+          '        if [[ "$MOCK_EXACT_PROVENANCE" != "1" || "$7" != "$RELEASE_RUN_ID" ]]; then',
+          "          return 68",
+          "        fi",
+          '        printf \'{"runId":"%s"}\\n\' "$RELEASE_RUN_ID"',
+          "        ;;",
+          "      verify-recovered-provenance)",
+          '        printf \'{"runId":"%s"}\\n\' "$MOCK_ORIGINAL_RUN_ID"',
+          "        ;;",
+          "      *) return 66 ;;",
+          "    esac",
+          "    return 0",
+          "  fi",
+          '  command node "$@"',
+          "}",
+          "gh() {",
+          '  if [[ "$1" != "api" ]]; then return 64; fi',
+          "  shift",
+          '  case "$1" in',
+          `    "repos/test/codex-security/actions/runs/${releaseRun}/jobs?per_page=100")`,
+          "      printf '%s\\n' \"$MOCK_RECOVERY_CONCLUSION\"",
+          "      ;;",
+          '    "repos/test/codex-security/actions/runs/30481596228")',
+          "      printf '%s\\t%s\\t%s\\t%s\\n' node-release completed \"$MOCK_ORIGINAL_COMMIT\" npm-v0.1.2",
+          "      ;;",
+          "    *) return 67 ;;",
+          "  esac",
+          "}",
+        ].join("\n");
+        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+          cwd: workspace,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: "/dev/null",
+            GITHUB_REPOSITORY: "test/codex-security",
+            MOCK_EXACT_PROVENANCE: exact ? "1" : "0",
+            MOCK_ORIGINAL_COMMIT: originalCommit,
+            MOCK_ORIGINAL_RUN_ID: "30481596228",
+            MOCK_RECOVERY_CONCLUSION: recoveryConclusion,
+            RELEASE_RUN_ID: releaseRun,
+            RELEASE_SHA: releaseCommit,
+            RELEASE_TAG: "npm-v0.1.2",
+            RELEASE_VERSION: "0.1.2",
+          },
+          timeout: 10_000,
+        });
+
+        expect(result.status).toBe(status);
+        if (status === 0) {
+          expect(result.stdout).toContain(message);
+        } else {
+          expect(result.stderr).toContain(message);
+        }
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.each([
     { description: "empty", existingNotes: "", updated: true },

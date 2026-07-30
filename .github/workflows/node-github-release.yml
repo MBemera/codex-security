@@ -183,8 +183,11 @@ jobs:
         id: artifact
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.release.outputs.run-id }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -217,17 +220,75 @@ jobs:
             --no-fund \
             --registry=https://registry.npmjs.org/ \
             "@openai/codex-security@$RELEASE_VERSION"
-          npm audit signatures \
-            --prefix "$consumer" \
-            --registry=https://registry.npmjs.org/ \
-            --json \
-            --include-attestations |
-            node sdk/typescript/scripts/release-automation.mjs \
-              verify-recovered-provenance \
-              "$archive" \
-              "$RELEASE_VERSION" \
-              "$RELEASE_SHA" \
-              "$GITHUB_REPOSITORY"
+          signature_report="$(
+            npm audit signatures \
+              --prefix "$consumer" \
+              --registry=https://registry.npmjs.org/ \
+              --json \
+              --include-attestations
+          )"
+
+          if verified_provenance="$(
+            printf '%s\n' "$signature_report" |
+              node sdk/typescript/scripts/release-automation.mjs \
+                verify-provenance \
+                "$archive" \
+                "$RELEASE_VERSION" \
+                "$RELEASE_SHA" \
+                "$GITHUB_REPOSITORY" \
+                "$RELEASE_RUN_ID" 2>/dev/null
+          )"; then
+            printf '%s\n' "$verified_provenance"
+            echo "Verified npm provenance for the resolved release run."
+          else
+            recovery_conclusion="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" \
+                --paginate \
+                --jq '.jobs[] | select(.name == "publish") | .steps[] | select(.name == "Verify recovered npm release provenance") | .conclusion'
+            )"
+            if [[ "$recovery_conclusion" != "success" ]]; then
+              echo "Signed npm provenance must identify the resolved successful release run." >&2
+              exit 1
+            fi
+
+            verified_provenance="$(
+              printf '%s\n' "$signature_report" |
+                node sdk/typescript/scripts/release-automation.mjs \
+                  verify-recovered-provenance \
+                  "$archive" \
+                  "$RELEASE_VERSION" \
+                  "$RELEASE_SHA" \
+                  "$GITHUB_REPOSITORY"
+            )"
+            original_run_id="$(
+              printf '%s\n' "$verified_provenance" |
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const provenance = JSON.parse(readFileSync(0, "utf8"));
+                  if (!/^[1-9][0-9]*$/.test(provenance.runId)) {
+                    throw new Error("The signing run must be a valid workflow run.");
+                  }
+                  process.stdout.write(provenance.runId);
+                '
+            )"
+            original_run_fields="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$original_run_id" \
+                --jq '[.name, .status, .head_sha, .head_branch] | @tsv'
+            )"
+            IFS=$'\t' read -r original_name original_status original_sha original_tag <<< "$original_run_fields"
+            if [[ "$original_name" != "node-release" ||
+                  "$original_status" != "completed" ||
+                  "$original_sha" != "$RELEASE_SHA" ||
+                  "$original_tag" != "$RELEASE_TAG" ]]; then
+              echo "Recovered npm provenance must identify the exact protected release." >&2
+              exit 1
+            fi
+
+            printf '%s\n' "$verified_provenance"
+            echo "Verified protected recovery provenance from its original signing run."
+          fi
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
 

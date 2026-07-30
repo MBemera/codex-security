@@ -97,12 +97,42 @@ jobs:
         run: |
           set -euo pipefail
 
-          existing_sha="$(
+          existing_ref="$(
             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '.object.sha' 2>/dev/null || true
+              --jq '[.object.type, .object.sha] | @tsv' 2>/dev/null || true
           )"
 
-          if [[ -n "$existing_sha" ]]; then
+          if [[ -n "$existing_ref" ]]; then
+            IFS=$'\t' read -r tag_type tag_object <<< "$existing_ref"
+            if [[ ! "$tag_object" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+              exit 1
+            fi
+
+            case "$tag_type" in
+              commit)
+                existing_sha="$tag_object"
+                ;;
+              tag)
+                if ! existing_sha="$(
+                  gh api \
+                    "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                    --jq 'if .object.type == "commit" then .object.sha else empty end'
+                )"; then
+                  echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+                exit 1
+                ;;
+            esac
+
+            if [[ ! "$existing_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+              exit 1
+            fi
             if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
               echo "Release tag $RELEASE_TAG already points to a different commit." >&2
               exit 1
