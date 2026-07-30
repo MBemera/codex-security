@@ -2293,6 +2293,7 @@ describe("GitHub release workflow safeguards", () => {
         "node() {",
         '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" &&',
         '        "${2:-}" == "verify-github-release" ]]; then',
+        "    cat >/dev/null",
         "    printf '%s\\n' 'verified existing GitHub release asset'",
         "    return 0",
         "  fi",
