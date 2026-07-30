@@ -2387,7 +2387,8 @@ describe("GitHub release workflow safeguards", () => {
         '  command node "$@"',
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync("bash", [], {
+        input: `${mocks}\n${script}`,
         encoding: "utf8",
         env: {
           ...process.env,
