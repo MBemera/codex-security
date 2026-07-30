@@ -594,6 +594,16 @@ describe("published GitHub and npm release history", () => {
     ).toEqual({ previousTag: "npm-v0.1.1", makeLatest: true });
   });
 
+  test("keeps an already-published newest GitHub release marked latest", () => {
+    expect(
+      releaseHistory("npm-v0.1.2", {
+        registryVersions: ["0.1.1", "0.1.2"],
+        githubReleaseTags: ["npm-v0.1.1", "npm-v0.1.2"],
+        reachableTags: ["npm-v0.1.1", "npm-v0.1.2"],
+      }),
+    ).toEqual({ previousTag: "npm-v0.1.1", makeLatest: true });
+  });
+
   test("never marks a historical backfill as latest", () => {
     expect(
       releaseHistory("npm-v0.1.2", {

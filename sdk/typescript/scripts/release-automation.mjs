@@ -400,7 +400,7 @@ export function releaseHistory(tag, history) {
     ) &&
     Array.from(publishedGitHubTags).every(
       (candidate) =>
-        compareReleaseVersions(version, candidate.slice("npm-v".length)) > 0,
+        compareReleaseVersions(version, candidate.slice("npm-v".length)) >= 0,
     );
 
   return { previousTag, makeLatest };
