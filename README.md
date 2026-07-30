@@ -8,7 +8,8 @@
 
 ## Quick start
 
-Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security.
+Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x, or
+Node.js 26.x; Python 3.10 or later; and access to Codex Security.
 
 ```bash
 npm install @openai/codex-security
@@ -46,6 +47,11 @@ unset OPENAI_API_KEY CODEX_API_KEY
 Scan history is stored in the Codex Security workbench state directory. If that
 directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
 directory outside the repository.
+
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
+root cause, reuses saved matches, and identifies new, persisting, reopened,
+resolved, or unknown findings. Missing findings remain unknown when coverage is
+incomplete or their original location was not reviewed.
 
 ## Verbose diagnostics
 

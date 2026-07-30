@@ -15,10 +15,11 @@ npm install @openai/codex-security
 npx @openai/codex-security --version
 ```
 
-The package supports macOS, Linux, and Windows and requires Node.js 22 or
-later. Scanning and exporting findings also require Python 3.10 or later. If
-you use Python 3.10, install the `tomli` package. Select another interpreter
-with `--python`, `pythonPath`, or `PYTHON` when needed.
+The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
+later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scanning and
+exporting findings also require Python 3.10 or later. If you use Python 3.10,
+install the `tomli` package. Select another interpreter with `--python`,
+`pythonPath`, or `PYTHON` when needed.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -460,10 +461,10 @@ cause; `scans match --all` matches all completed scans of the current repository
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
-`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reads saved matches and reports
-findings as new, persisting, reopened, resolved, or unknown. Missing findings
-are not treated as resolved when the later scan is incomplete or does not cover
-their original scope.
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
+root cause, reuses saved matches, and reports findings as new, persisting,
+reopened, resolved, or unknown. Missing findings are not treated as resolved when
+the later scan is incomplete or does not cover their original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
