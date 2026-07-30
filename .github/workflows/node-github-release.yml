@@ -26,8 +26,10 @@ jobs:
   release:
     if: >-
       github.repository == 'openai/codex-security' &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event.workflow_run.conclusion == 'success')
+      ((github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'))
     name: publish verified GitHub release
     runs-on: ubuntu-latest
     permissions:
@@ -40,6 +42,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: refs/heads/main
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
@@ -325,7 +328,45 @@ jobs:
               node sdk/typescript/scripts/release-automation.mjs \
                 verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG" \
                 "$downloaded_archive"
-            echo "The verified GitHub Release already exists."
+
+            notes_args=(
+              --method POST
+              "repos/$GITHUB_REPOSITORY/releases/generate-notes"
+              -f "tag_name=$RELEASE_TAG"
+              -f "target_commitish=$RELEASE_SHA"
+              -f "configuration_file_path=.github/release.yml"
+            )
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
+            fi
+            generated_notes="$(gh api "${notes_args[@]}" --jq '.body')"
+            if [[ -z "$generated_notes" ]]; then
+              echo "Generated GitHub release notes must not be empty." >&2
+              exit 1
+            fi
+
+            existing_notes="$(
+              printf '%s\n' "$existing_release" |
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const release = JSON.parse(readFileSync(0, "utf8"));
+                  if (release.body != null && typeof release.body !== "string") {
+                    throw new Error("Existing release notes must be a string.");
+                  }
+                  process.stdout.write(release.body ?? "");
+                '
+            )"
+
+            if [[ "$existing_notes" != "$generated_notes" ]]; then
+              printf '%s\n' "$generated_notes" |
+                gh release edit "$RELEASE_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --verify-tag \
+                  --notes-file -
+              echo "Updated existing GitHub Release with generated notes."
+            else
+              echo "The verified GitHub Release already exists."
+            fi
             exit 0
           fi
 

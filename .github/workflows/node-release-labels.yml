@@ -63,8 +63,24 @@ jobs:
 
           while IFS= read -r current_label; do
             if [[ "$current_label" == "skip-release-notes" ]]; then
-              echo "Preserving existing skip-release-notes label."
-              exit 0
+              skip_label_actors="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
+                  --paginate \
+                  --jq '.[] | select(.event == "labeled" and .label.name == "skip-release-notes") | .actor.login'
+              )"
+              skip_label_actor=""
+              while IFS= read -r event_actor; do
+                if [[ -n "$event_actor" ]]; then
+                  skip_label_actor="$event_actor"
+                fi
+              done <<< "$skip_label_actors"
+
+              if [[ "$skip_label_actor" != "github-actions[bot]" ]]; then
+                echo "Preserving existing skip-release-notes label."
+                exit 0
+              fi
+              break
             fi
           done <<< "$current_labels"
 
