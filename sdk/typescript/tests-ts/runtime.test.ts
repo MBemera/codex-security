@@ -1723,6 +1723,13 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toThrow("trusted owner");
     expect(() =>
       requireTrustedOutputAncestor(
+        { mode: 0o40755, uid: 1001 },
+        "/other-user",
+        1000,
+      ),
+    ).toThrow("trusted owner");
+    expect(() =>
+      requireTrustedOutputAncestor(
         { mode: 0o41777, uid: 1000 },
         "/shared",
         1000,

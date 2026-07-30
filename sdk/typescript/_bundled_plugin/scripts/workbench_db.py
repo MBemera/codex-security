@@ -3477,8 +3477,30 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
                 "Scan directory must not be accessible to other users (chmod 700)."
             )
         geteuid = getattr(os, "geteuid", None)
-        if geteuid is not None and metadata.st_uid != geteuid():
+        effective_uid = geteuid() if geteuid is not None else None
+        if effective_uid is not None and metadata.st_uid != effective_uid:
             raise SystemExit("Scan directory must be owned by the current user.")
+        for parent in scan_dir.parents:
+            try:
+                parent_metadata = parent.lstat()
+            except OSError as exc:
+                raise SystemExit("Scan output parent could not be inspected.") from exc
+            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
+                parent_metadata.st_mode
+            ):
+                raise SystemExit("Scan output parent must be a non-symlink directory.")
+            if effective_uid is not None and parent_metadata.st_uid not in {
+                0,
+                effective_uid,
+            }:
+                raise SystemExit("Scan output parent must have a trusted owner.")
+            if (
+                stat.S_IMODE(parent_metadata.st_mode) & 0o022
+                and not parent_metadata.st_mode & stat.S_ISVTX
+            ):
+                raise SystemExit(
+                    "Scan output parent must not be group- or world-writable without the sticky bit."
+                )
     return scan_dir
 
 

@@ -783,19 +783,19 @@ export function requireTrustedOutputAncestor(
   path: string,
   effectiveUid = process.geteuid?.(),
 ): void {
-  if ((metadata.mode & 0o022) === 0) return;
-  if ((metadata.mode & 0o1000) === 0) {
-    throw new OutputDirectoryError(
-      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
-    );
-  }
   if (
     effectiveUid !== undefined &&
     metadata.uid !== 0 &&
     metadata.uid !== effectiveUid
   ) {
     throw new OutputDirectoryError(
-      `A sticky shared scan output parent must have a trusted owner: ${path}`,
+      `Scan output parent must have a trusted owner: ${path}`,
+    );
+  }
+  if ((metadata.mode & 0o022) === 0) return;
+  if ((metadata.mode & 0o1000) === 0) {
+    throw new OutputDirectoryError(
+      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
     );
   }
 }

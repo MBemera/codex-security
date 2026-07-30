@@ -622,6 +622,7 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
+    requirePrivateOutputDirectory(current, root.path);
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
