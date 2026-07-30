@@ -42,7 +42,7 @@ us:
 
 Support is best effort. We can't promise product access, free usage, a
 response by a particular date, a completed scan, or a fix. Scan only
-repositories you own or have permission to assess.
+repositories you trust and either own or have explicit permission to assess.
 
 ## Report a bug
 
