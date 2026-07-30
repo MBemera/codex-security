@@ -1529,6 +1529,72 @@ describe("GitHub release workflow safeguards", () => {
     expect(releaseLabelsWorkflow).toContain("return 0");
   });
 
+  test.each([
+    { title: "fix: retitle an internal change" },
+    { title: "feat: retitle an internal change" },
+    { title: "docs: retitle an internal change" },
+    { title: "chore: retitle an internal change" },
+  ])(
+    "preserves a manually excluded release after retitling to $title",
+    ({ title }) => {
+      const script = workflowStepShell(
+        releaseLabelsWorkflow,
+        "Categorize pull request without checking out its code",
+      );
+      const mock = [
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        "  local method=GET",
+        '  if [[ "${1:-}" == "--method" ]]; then',
+        '    method="$2"',
+        "    shift 2",
+        "  fi",
+        '  local endpoint="$1"',
+        "  shift",
+        '  case "$method $endpoint" in',
+        '    "GET repos/test/codex-security/issues/17")',
+        "      printf '%s\\n' \"$MOCK_PR_TITLE\"",
+        "      ;;",
+        '    "GET repos/test/codex-security/issues/17/labels")',
+        "      printf '%s\\n' enhancement skip-release-notes",
+        "      ;;",
+        '    "DELETE repos/test/codex-security/issues/17/labels/enhancement" | "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
+        "      printf '%s\\n' 'removed a manually excluded release label'",
+        "      return 70",
+        "      ;;",
+        '    "POST repos/test/codex-security/issues/17/labels")',
+        "      printf '%s\\n' 'overrode a manually excluded release'",
+        "      return 71",
+        "      ;;",
+        "    *) return 65 ;;",
+        "  esac",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          MOCK_PR_TITLE: title,
+          PR_NUMBER: "17",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        "Preserving existing skip-release-notes label.",
+      );
+      expect(result.stdout).not.toContain(
+        "removed a manually excluded release label",
+      );
+      expect(result.stdout).not.toContain(
+        "overrode a manually excluded release",
+      );
+    },
+  );
+
   test("recovers when another PR concurrently creates the skip label", () => {
     expect(releaseLabelsWorkflow).toContain(
       'if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels"',

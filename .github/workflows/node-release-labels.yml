@@ -62,6 +62,13 @@ jobs:
           )"
 
           while IFS= read -r current_label; do
+            if [[ "$current_label" == "skip-release-notes" ]]; then
+              echo "Preserving existing skip-release-notes label."
+              exit 0
+            fi
+          done <<< "$current_labels"
+
+          while IFS= read -r current_label; do
             case "$current_label" in
               enhancement | bug | documentation | skip-release-notes)
                 if [[ "$current_label" != "$label" ]]; then
