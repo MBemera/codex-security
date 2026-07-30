@@ -151,7 +151,7 @@ jobs:
             )"
           fi
 
-          if [[ ! "$release_run" =~ ^[0-9]+$ ]]; then
+          if [[ ! "$release_run" =~ ^[1-9][0-9]*$ ]]; then
             echo "No successful protected npm release exists for $release_tag." >&2
             exit 1
           fi
@@ -386,6 +386,49 @@ jobs:
         run: |
           set -euo pipefail
 
+          verify_release_tag() {
+            local live_ref live_type live_object live_commit
+            if ! live_ref="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+                --jq '[.object.type, .object.sha] | @tsv'
+            )"; then
+              echo "GitHub release tag must still point to the verified commit." >&2
+              return 1
+            fi
+            IFS=$'\t' read -r live_type live_object <<< "$live_ref"
+            if [[ ! "$live_object" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "GitHub release tag must still point to the verified commit." >&2
+              return 1
+            fi
+
+            case "$live_type" in
+              commit)
+                live_commit="$live_object"
+                ;;
+              tag)
+                if ! live_commit="$(
+                  gh api \
+                    "repos/$GITHUB_REPOSITORY/git/tags/$live_object" \
+                    --jq 'if .object.type == "commit" then .object.sha else empty end'
+                )"; then
+                  echo "GitHub release tag must still point to the verified commit." >&2
+                  return 1
+                fi
+                ;;
+              *)
+                echo "GitHub release tag must still point to the verified commit." >&2
+                return 1
+                ;;
+            esac
+
+            if [[ ! "$live_commit" =~ ^[0-9a-fA-F]{40}$ ||
+                  "$live_commit" != "$RELEASE_SHA" ]]; then
+              echo "GitHub release tag must still point to the verified commit." >&2
+              return 1
+            fi
+          }
+
           if existing_release="$(
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
               2>/dev/null
@@ -437,12 +480,32 @@ jobs:
                 '
             )"
 
-            if [[ "$existing_notes" != "$generated_notes" ]]; then
-              printf '%s\n' "$generated_notes" |
+            current_latest_tag="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name'
+            )"
+            currently_latest=false
+            if [[ "$current_latest_tag" == "$RELEASE_TAG" ]]; then
+              currently_latest=true
+            fi
+
+            if [[ "$existing_notes" != "$generated_notes" ||
+                  "$currently_latest" != "$MAKE_LATEST" ]]; then
+              verify_release_tag
+              if [[ "$existing_notes" != "$generated_notes" ]]; then
+                printf '%s\n' "$generated_notes" |
+                  gh release edit "$RELEASE_TAG" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --latest="$MAKE_LATEST" \
+                    --notes-file -
+                echo "Updated existing GitHub Release with generated notes."
+              else
                 gh release edit "$RELEASE_TAG" \
                   --repo "$GITHUB_REPOSITORY" \
-                  --notes-file -
-              echo "Updated existing GitHub Release with generated notes."
+                  --latest="$MAKE_LATEST"
+              fi
+              if [[ "$currently_latest" != "$MAKE_LATEST" ]]; then
+                echo "Updated existing GitHub Release Latest status."
+              fi
             else
               echo "The verified GitHub Release already exists."
             fi
@@ -462,4 +525,5 @@ jobs:
             release_args+=(--notes-start-tag "$PREVIOUS_TAG")
           fi
 
+          verify_release_tag
           gh release create "${release_args[@]}"

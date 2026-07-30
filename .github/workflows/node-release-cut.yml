@@ -73,11 +73,17 @@ jobs:
             fi
           fi
 
-          published_versions="$(
+          if ! published_versions="$(
             npm view @openai/codex-security versions \
               --json \
               --registry=https://registry.npmjs.org/
-          )"
+          )"; then
+            published_versions="$(
+              printf '%s\n' "$published_versions" |
+                node sdk/typescript/scripts/release-automation.mjs \
+                  initial-published-versions "$version"
+            )"
+          fi
           printf '%s\n' "$published_versions" |
             node sdk/typescript/scripts/release-automation.mjs \
               require-published-increase "$version" >/dev/null

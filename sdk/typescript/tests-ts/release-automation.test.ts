@@ -24,6 +24,10 @@ type ReleaseAutomation = {
   ) => string;
   compareReleaseVersions: (left: string, right: string) => -1 | 0 | 1;
   requireReleaseIncrease: (version: string, previousVersion: string) => string;
+  initialPublishedVersions: (
+    version: string,
+    registryError: unknown,
+  ) => string[];
   publishedReleaseMode: (
     version: string,
     publishedVersions: unknown,
@@ -99,6 +103,7 @@ const {
   releaseTagVersion,
   compareReleaseVersions,
   requireReleaseIncrease,
+  initialPublishedVersions,
   publishedReleaseMode,
   requirePublishedReleaseIncrease,
   releaseHistory,
@@ -507,6 +512,27 @@ describe("monotonic stable release versions", () => {
   test("identifies a strictly increasing version as a new publication", () => {
     expect(publishedReleaseMode("0.1.3", ["0.1.0", "0.1.2"])).toBe("publish");
   });
+
+  test("allows a missing npm package only for its initial stable release", () => {
+    expect(
+      initialPublishedVersions("0.1.0", { error: { code: "E404" } }),
+    ).toEqual([]);
+  });
+
+  test.each([
+    { version: "0.1.1", registryError: { error: { code: "E404" } } },
+    { version: "0.1.0", registryError: { error: { code: "E403" } } },
+    { version: "0.1.0", registryError: { error: { code: "ETIMEDOUT" } } },
+    { version: "0.1.0", registryError: { error: null } },
+    { version: "0.1.0", registryError: null },
+  ])(
+    "rejects unverified npm history for $version and registry response $registryError",
+    ({ version, registryError }) => {
+      expect(() => initialPublishedVersions(version, registryError)).toThrow(
+        "Unable to verify published npm release history.",
+      );
+    },
+  );
 
   test("identifies the current published version as recoverable", () => {
     expect(publishedReleaseMode("0.1.2", ["0.1.0", "0.1.2"])).toBe("recover");
@@ -1304,6 +1330,98 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     {
+      workflow: "release cut",
+      version: "0.1.0",
+      errorCode: "E404",
+      status: 0,
+    },
+    {
+      workflow: "protected publisher",
+      version: "0.1.0",
+      errorCode: "E404",
+      status: 0,
+    },
+    {
+      workflow: "release cut",
+      version: "0.1.1",
+      errorCode: "E404",
+      status: 1,
+    },
+    {
+      workflow: "protected publisher",
+      version: "0.1.1",
+      errorCode: "E404",
+      status: 1,
+    },
+    {
+      workflow: "release cut",
+      version: "0.1.0",
+      errorCode: "ETIMEDOUT",
+      status: 1,
+    },
+    {
+      workflow: "protected publisher",
+      version: "0.1.0",
+      errorCode: "E403",
+      status: 1,
+    },
+  ])(
+    "handles $errorCode during $workflow npm-history validation for $version",
+    ({ workflow, version, errorCode, status }) => {
+      const cutting = workflow === "release cut";
+      const script = workflowStepShell(
+        cutting ? releaseCutWorkflow : protectedReleaseWorkflow,
+        cutting ? "Resolve the stable package version" : "Validate release tag",
+      );
+      const mocks = [
+        "git() { return 0; }",
+        "node() {",
+        '  if [[ "${2:-}" == "version" || "${2:-}" == "release-tag" ]]; then',
+        "    printf '%s\\n' \"$MOCK_RELEASE_VERSION\"",
+        "    return 0",
+        "  fi",
+        '  command node "$@"',
+        "}",
+        "npm() {",
+        "  printf '%s\\n' \"$MOCK_REGISTRY_RESPONSE\"",
+        "  return 1",
+        "}",
+        "sfw() {",
+        "  printf '%s\\n' \"$MOCK_REGISTRY_RESPONSE\"",
+        "  return 1",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          BEFORE_SHA: "",
+          GITHUB_EVENT_NAME: "workflow_dispatch",
+          GITHUB_OUTPUT: "/dev/null",
+          GITHUB_REF: cutting ? "refs/heads/main" : `refs/tags/npm-v${version}`,
+          GITHUB_REF_NAME: `npm-v${version}`,
+          GITHUB_REF_TYPE: "tag",
+          GITHUB_SHA: releaseCommit,
+          MOCK_REGISTRY_RESPONSE: JSON.stringify({
+            error: { code: errorCode },
+          }),
+          MOCK_RELEASE_VERSION: version,
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(status);
+      if (status !== 0) {
+        expect(result.stderr).toContain(
+          "Unable to verify published npm release history.",
+        );
+      }
+    },
+  );
+
+  test.each([
+    {
       kind: "existing lightweight tag",
       tagType: "commit",
       tagObject: releaseCommit,
@@ -1698,6 +1816,146 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
+  test.each(["0", "01", "000123"])(
+    "rejects the noncanonical protected GitHub release run ID %j",
+    (runId) => {
+      const script = workflowStepShell(
+        githubReleaseWorkflow,
+        "Resolve the successful protected release",
+      );
+      const mocks = [
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  case "$1" in',
+        '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
+        `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
+        "      ;;",
+        '    "repos/openai/codex-security/actions/runs/"*)',
+        `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
+        "      ;;",
+        "    *) return 65 ;;",
+        "  esac",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: "/dev/null",
+          GITHUB_REPOSITORY: "openai/codex-security",
+          INPUT_RUN_ID: runId,
+          INPUT_TAG: "npm-v0.1.2",
+          TRIGGER_RUN_ID: "",
+          TRIGGER_TAG: "",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "No successful protected npm release exists for npm-v0.1.2.",
+      );
+    },
+  );
+
+  test.each([
+    {
+      description: "verified lightweight release tag",
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description: "verified annotated release tag",
+      tagType: "tag",
+      tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      peeledCommit: releaseCommit,
+      status: 0,
+    },
+    {
+      description: "deleted release tag",
+      tagType: "missing",
+      tagObject: "",
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "retargeted lightweight release tag",
+      tagType: "commit",
+      tagObject: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "retargeted annotated release tag",
+      tagType: "tag",
+      tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      peeledCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      status: 1,
+    },
+  ])(
+    "revalidates the $description immediately before creating its GitHub release",
+    ({ tagType, tagObject, peeledCommit, status }) => {
+      const script = workflowStepShell(
+        githubReleaseWorkflow,
+        "Publish GitHub Release and generated notes",
+      );
+      const mocks = [
+        "gh() {",
+        '  if [[ "$1" == "api" ]]; then',
+        "    shift",
+        '    case "$1" in',
+        '      "repos/test/codex-security/releases/tags/npm-v0.1.2")',
+        "        return 1",
+        "        ;;",
+        '      "repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
+        '        if [[ "$MOCK_TAG_TYPE" == "missing" ]]; then return 1; fi',
+        '        printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
+        "        ;;",
+        '      "repos/test/codex-security/git/tags/"*)',
+        "        printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
+        "        ;;",
+        "      *) return 65 ;;",
+        "    esac",
+        '  elif [[ "$1" == "release" && "$2" == "create" ]]; then',
+        "    printf '%s\\n' 'created verified GitHub release'",
+        "  else",
+        "    return 64",
+        "  fi",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          MAKE_LATEST: "false",
+          MOCK_PEELED_COMMIT: peeledCommit,
+          MOCK_TAG_OBJECT: tagObject,
+          MOCK_TAG_TYPE: tagType,
+          PREVIOUS_TAG: "npm-v0.1.1",
+          RELEASE_ARCHIVE: "/tmp/openai-codex-security-0.1.2.tgz",
+          RELEASE_SHA: releaseCommit,
+          RELEASE_TAG: "npm-v0.1.2",
+          RELEASE_VERSION: "0.1.2",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(status);
+      if (status === 0) {
+        expect(result.stdout).toContain("created verified GitHub release");
+      } else {
+        expect(result.stdout).not.toContain("created verified GitHub release");
+        expect(result.stderr).toContain(
+          "GitHub release tag must still point to the verified commit.",
+        );
+      }
+    },
+  );
+
   test("explicitly prevents historical releases becoming latest", () => {
     expect(githubReleaseWorkflow).toContain("--generate-notes");
     expect(githubReleaseWorkflow).toContain('--latest="$MAKE_LATEST"');
@@ -1859,20 +2117,105 @@ describe("GitHub release workflow safeguards", () => {
   );
 
   test.each([
-    { description: "empty", existingNotes: "", updated: true },
+    {
+      description: "empty",
+      existingNotes: "",
+      updated: true,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
     {
       description: "manually written",
       existingNotes: "Manually written release notes",
       updated: true,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
     },
     {
       description: "already current",
       existingNotes: "Generated release notes",
       updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description:
+        "already current on a newest release incorrectly marked non-Latest",
+      existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "npm-v0.1.1",
+      makeLatest: true,
+      latestUpdated: true,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description:
+        "already current on a historical release incorrectly marked Latest",
+      existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "npm-v0.1.2",
+      makeLatest: false,
+      latestUpdated: true,
+      tagType: "tag",
+      tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      peeledCommit: releaseCommit,
+      status: 0,
+    },
+    {
+      description: "stale when its lightweight release tag was retargeted",
+      existingNotes: "Manually written release notes",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "stale when its annotated release tag was retargeted",
+      existingNotes: "Manually written release notes",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "tag",
+      tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      peeledCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      status: 1,
     },
   ])(
     "reconciles $description notes on an existing verified GitHub release",
-    ({ existingNotes, updated }) => {
+    ({
+      existingNotes,
+      updated,
+      latestTag,
+      makeLatest,
+      latestUpdated,
+      tagType,
+      tagObject,
+      peeledCommit,
+      status,
+    }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Publish GitHub Release and generated notes",
@@ -1889,6 +2232,15 @@ describe("GitHub release workflow safeguards", () => {
         '    case "$method $1" in',
         '      "GET repos/test/codex-security/releases/tags/npm-v0.1.2")',
         '        printf \'{"tag_name":"npm-v0.1.2","draft":false,"prerelease":false,"body":"%s","assets":[]}\\n\' "$MOCK_EXISTING_NOTES"',
+        "        ;;",
+        '      "GET repos/test/codex-security/releases/latest")',
+        "        printf '%s\\n' \"$MOCK_LATEST_TAG\"",
+        "        ;;",
+        '      "GET repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
+        '        printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
+        "        ;;",
+        '      "GET repos/test/codex-security/git/tags/"*)',
+        "        printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
         "        ;;",
         '      "POST repos/test/codex-security/releases/generate-notes")',
         "        printf '%s\\n' 'Generated release notes'",
@@ -1913,14 +2265,23 @@ describe("GitHub release workflow safeguards", () => {
         "        ;;",
         "      edit)",
         "        shift",
+        "        local edit_latest= notes=0",
         '        for argument in "$@"; do',
         '          if [[ "$argument" == "--verify-tag" ]]; then',
         "            printf '%s\\n' 'unknown flag: --verify-tag' >&2",
         "            return 67",
         "          fi",
+        '          if [[ "$argument" == --latest=* ]]; then',
+        '            edit_latest="${argument#--latest=}"',
+        "          fi",
+        '          if [[ "$argument" == "--notes-file" ]]; then notes=1; fi',
         "        done",
-        "        printf '%s: ' 'updated release notes'",
-        "        cat",
+        '        if [[ "$edit_latest" != "$MOCK_MAKE_LATEST" ]]; then return 68; fi',
+        "        printf 'updated latest: %s\\n' \"$edit_latest\"",
+        '        if [[ "$notes" == 1 ]]; then',
+        "          printf '%s: ' 'updated release notes'",
+        "          cat",
+        "        fi",
         "        ;;",
         "      create) return 70 ;;",
         "      *) return 66 ;;",
@@ -1943,8 +2304,13 @@ describe("GitHub release workflow safeguards", () => {
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
-          MAKE_LATEST: "false",
+          MAKE_LATEST: String(makeLatest),
           MOCK_EXISTING_NOTES: existingNotes,
+          MOCK_LATEST_TAG: latestTag,
+          MOCK_MAKE_LATEST: String(makeLatest),
+          MOCK_PEELED_COMMIT: peeledCommit,
+          MOCK_TAG_OBJECT: tagObject,
+          MOCK_TAG_TYPE: tagType,
           PREVIOUS_TAG: "npm-v0.1.1",
           RELEASE_ARCHIVE: "/tmp/openai-codex-security-0.1.2.tgz",
           RELEASE_SHA: releaseCommit,
@@ -1954,14 +2320,26 @@ describe("GitHub release workflow safeguards", () => {
         timeout: 10_000,
       });
 
-      expect(result.status).toBe(0);
+      expect(result.status).toBe(status);
       expect(result.stdout).toContain("verified existing GitHub release asset");
+      if (status !== 0) {
+        expect(result.stderr).toContain(
+          "GitHub release tag must still point to the verified commit.",
+        );
+        return;
+      }
       if (updated) {
         expect(result.stdout).toContain(
           "updated release notes: Generated release notes",
         );
         expect(result.stdout).toContain(
           "Updated existing GitHub Release with generated notes.",
+        );
+      } else if (latestUpdated) {
+        expect(result.stdout).not.toContain("updated release notes:");
+        expect(result.stdout).toContain(`updated latest: ${makeLatest}`);
+        expect(result.stdout).toContain(
+          "Updated existing GitHub Release Latest status.",
         );
       } else {
         expect(result.stdout).not.toContain("updated release notes:");
@@ -2079,6 +2457,61 @@ describe("GitHub release workflow safeguards", () => {
       );
     },
   );
+
+  test("preserves the latest unattributed skip label after earlier automation", () => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const mock = [
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      "  local method=GET",
+      '  if [[ "${1:-}" == "--method" ]]; then',
+      '    method="$2"',
+      "    shift 2",
+      "  fi",
+      '  local endpoint="$1"',
+      "  shift",
+      '  case "$method $endpoint" in',
+      '    "GET repos/test/codex-security/issues/17")',
+      "      printf '%s\\n' 'feat: customer-visible change'",
+      "      ;;",
+      '    "GET repos/test/codex-security/issues/17/labels")',
+      "      printf '%s\\n' skip-release-notes",
+      "      ;;",
+      '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
+      '      if [[ "$*" == *"__unattributed__"* ]]; then',
+      "        printf '%s\\n' 'github-actions[bot]' '__unattributed__'",
+      "      else",
+      "        printf '%s\\n' 'github-actions[bot]' ''",
+      "      fi",
+      "      ;;",
+      '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
+      "      printf '%s\\n' 'removed an unattributed release exclusion'",
+      "      return 70",
+      "      ;;",
+      "    *) return 65 ;;",
+      "  esac",
+      "}",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Preserving existing skip-release-notes label.",
+    );
+    expect(result.stdout).not.toContain("removed an unattributed release");
+  });
 
   test.each([
     { title: "feat: publish a customer feature", label: "enhancement" },

@@ -67,13 +67,11 @@ jobs:
                 gh api \
                   "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
                   --paginate \
-                  --jq '.[] | select(.event == "labeled" and .label.name == "skip-release-notes") | .actor.login'
+                  --jq '.[] | select(.event == "labeled" and .label.name == "skip-release-notes") | if (.actor.login // "") == "" then "__unattributed__" else .actor.login end'
               )"
               skip_label_actor=""
               while IFS= read -r event_actor; do
-                if [[ -n "$event_actor" ]]; then
-                  skip_label_actor="$event_actor"
-                fi
+                skip_label_actor="$event_actor"
               done <<< "$skip_label_actors"
 
               if [[ "$skip_label_actor" != "github-actions[bot]" ]]; then
