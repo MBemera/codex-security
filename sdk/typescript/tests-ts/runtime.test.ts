@@ -1705,7 +1705,9 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       temporaryDirectories.push(output);
 
-      await expect(requireSecureOutputAncestry(output)).resolves.toBeUndefined();
+      await expect(
+        requireSecureOutputAncestry(output),
+      ).resolves.toBeUndefined();
       expect(await prepareOutputDir(output, "repo")).toBe(output);
     },
   );
