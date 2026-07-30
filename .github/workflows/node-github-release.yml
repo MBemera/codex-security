@@ -429,10 +429,52 @@ jobs:
             fi
           }
 
-          if existing_release="$(
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-              2>/dev/null
-          )"; then
+          github_release_or_missing() {
+            local endpoint="$1" label="$2" query_status=0 response
+            response="$(gh api --include "$endpoint" 2>/dev/null)" ||
+              query_status=$?
+            printf '%s\n' "$response" |
+              CODEX_SECURITY_RELEASE_QUERY_STATUS="$query_status" \
+                CODEX_SECURITY_RELEASE_LABEL="$label" \
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const fail = () => {
+                    throw new Error(
+                      "Unable to resolve the " +
+                        process.env.CODEX_SECURITY_RELEASE_LABEL +
+                        ".",
+                    );
+                  };
+                  const raw = readFileSync(0, "utf8");
+                  const separator = raw.search(/\r?\n\r?\n/u);
+                  const status = /^HTTP\/\d+(?:\.\d+)?\s+(\d{3})(?:\s|$)/u.exec(
+                    raw.slice(0, separator),
+                  );
+                  if (separator < 0 || status == null) fail();
+                  let response;
+                  try {
+                    response = JSON.parse(
+                      raw.slice(separator + (raw[separator] === "\r" ? 4 : 2)),
+                    );
+                  } catch {
+                    fail();
+                  }
+                  if (response == null || typeof response !== "object") fail();
+                  if (process.env.CODEX_SECURITY_RELEASE_QUERY_STATUS === "0") {
+                    if (Number(status[1]) < 200 || Number(status[1]) >= 300) fail();
+                    process.stdout.write(JSON.stringify(response));
+                  } else if (status[1] !== "404") {
+                    fail();
+                  }
+                '
+          }
+
+          existing_release="$(
+            github_release_or_missing \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              "existing GitHub Release"
+          )"
+          if [[ -n "$existing_release" ]]; then
             asset_name="$(basename "$RELEASE_ARCHIVE")"
             downloaded_assets="$(mktemp -d)"
             trap 'rm -rf "$downloaded_assets"' EXIT
@@ -480,55 +522,30 @@ jobs:
                 '
             )"
 
-            latest_query_status=0
             latest_response="$(
-              gh api --include \
-                "repos/$GITHUB_REPOSITORY/releases/latest" 2>/dev/null
-            )" || latest_query_status=$?
-            current_latest_tag="$(
-              printf '%s\n' "$latest_response" |
-                CODEX_SECURITY_LATEST_QUERY_STATUS="$latest_query_status" \
+              github_release_or_missing \
+                "repos/$GITHUB_REPOSITORY/releases/latest" \
+                "current Latest GitHub Release"
+            )"
+            current_latest_tag=""
+            if [[ -n "$latest_response" ]]; then
+              current_latest_tag="$(
+                printf '%s\n' "$latest_response" |
                   node --input-type=module --eval '
                     import { readFileSync } from "node:fs";
-                    const raw = readFileSync(0, "utf8");
-                    const separator = raw.search(/\r?\n\r?\n/u);
-                    const status = /^HTTP\/\d+(?:\.\d+)?\s+(\d{3})(?:\s|$)/u.exec(
-                      raw.slice(0, separator),
-                    );
-                    if (separator < 0 || status == null) {
+                    const response = JSON.parse(readFileSync(0, "utf8"));
+                    if (
+                      typeof response.tag_name !== "string" ||
+                      response.tag_name.length === 0
+                    ) {
                       throw new Error(
                         "Unable to resolve the current Latest GitHub Release.",
                       );
                     }
-                    let response;
-                    try {
-                      response = JSON.parse(
-                        raw.slice(separator + (raw[separator] === "\r" ? 4 : 2)),
-                      );
-                    } catch {
-                      throw new Error(
-                        "Unable to resolve the current Latest GitHub Release.",
-                      );
-                    }
-                    if (process.env.CODEX_SECURITY_LATEST_QUERY_STATUS === "0") {
-                      if (
-                        Number(status[1]) < 200 ||
-                        Number(status[1]) >= 300 ||
-                        typeof response.tag_name !== "string" ||
-                        response.tag_name.length === 0
-                      ) {
-                        throw new Error(
-                          "Unable to resolve the current Latest GitHub Release.",
-                        );
-                      }
-                      process.stdout.write(response.tag_name);
-                    } else if (status[1] !== "404") {
-                      throw new Error(
-                        "Unable to resolve the current Latest GitHub Release.",
-                      );
-                    }
+                    process.stdout.write(response.tag_name);
                   '
-            )"
+              )"
+            fi
             currently_latest=false
             if [[ "$current_latest_tag" == "$RELEASE_TAG" ]]; then
               currently_latest=true

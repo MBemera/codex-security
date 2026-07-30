@@ -1880,6 +1880,7 @@ describe("GitHub release workflow safeguards", () => {
   test.each([
     {
       description: "verified lightweight release tag",
+      existingLookup: "missing",
       tagType: "commit",
       tagObject: releaseCommit,
       peeledCommit: "",
@@ -1887,6 +1888,7 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description: "verified annotated release tag",
+      existingLookup: "missing",
       tagType: "tag",
       tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       peeledCommit: releaseCommit,
@@ -1894,6 +1896,7 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description: "deleted release tag",
+      existingLookup: "missing",
       tagType: "missing",
       tagObject: "",
       peeledCommit: "",
@@ -1901,6 +1904,7 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description: "retargeted lightweight release tag",
+      existingLookup: "missing",
       tagType: "commit",
       tagObject: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       peeledCommit: "",
@@ -1908,14 +1912,47 @@ describe("GitHub release workflow safeguards", () => {
     },
     {
       description: "retargeted annotated release tag",
+      existingLookup: "missing",
       tagType: "tag",
       tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       peeledCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       status: 1,
     },
+    {
+      description: "release lookup returning an unexpected HTTP 500",
+      existingLookup: "unavailable",
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "release lookup rejecting its authentication",
+      existingLookup: "unauthorized",
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "release lookup without an HTTP response",
+      existingLookup: "network",
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
+      description: "release lookup returning a malformed HTTP 404",
+      existingLookup: "malformed",
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
   ])(
     "revalidates the $description immediately before creating its GitHub release",
-    ({ tagType, tagObject, peeledCommit, status }) => {
+    ({ existingLookup, tagType, tagObject, peeledCommit, status }) => {
       const script = workflowStepShell(
         githubReleaseWorkflow,
         "Publish GitHub Release and generated notes",
@@ -1924,8 +1961,24 @@ describe("GitHub release workflow safeguards", () => {
         "gh() {",
         '  if [[ "$1" == "api" ]]; then',
         "    shift",
+        '    if [[ "${1:-}" == "--include" ]]; then shift; fi',
         '    case "$1" in',
         '      "repos/test/codex-security/releases/tags/npm-v0.1.2")',
+        '        case "$MOCK_EXISTING_LOOKUP" in',
+        "          missing)",
+        "            printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' '{\"message\":\"Not Found\"}'",
+        "            ;;",
+        "          unavailable)",
+        "            printf '%s\\n' 'HTTP/2.0 500 Internal Server Error' 'content-type: application/json' '' '{\"message\":\"Unavailable\"}'",
+        "            ;;",
+        "          unauthorized)",
+        "            printf '%s\\n' 'HTTP/2.0 401 Unauthorized' 'content-type: application/json' '' '{\"message\":\"Bad credentials\"}'",
+        "            ;;",
+        "          network) ;;",
+        "          malformed)",
+        "            printf '%s\\n' 'HTTP/2.0 404 Not Found' 'content-type: application/json' '' 'not-json'",
+        "            ;;",
+        "        esac",
         "        return 1",
         "        ;;",
         '      "repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
@@ -1944,12 +1997,14 @@ describe("GitHub release workflow safeguards", () => {
         "  fi",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync("bash", [], {
+        input: `${mocks}\n${script}`,
         encoding: "utf8",
         env: {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
           MAKE_LATEST: "false",
+          MOCK_EXISTING_LOOKUP: existingLookup,
           MOCK_PEELED_COMMIT: peeledCommit,
           MOCK_TAG_OBJECT: tagObject,
           MOCK_TAG_TYPE: tagType,
@@ -1968,7 +2023,9 @@ describe("GitHub release workflow safeguards", () => {
       } else {
         expect(result.stdout).not.toContain("created verified GitHub release");
         expect(result.stderr).toContain(
-          "GitHub release tag must still point to the verified commit.",
+          existingLookup === "missing"
+            ? "GitHub release tag must still point to the verified commit."
+            : "Unable to resolve the existing GitHub Release.",
         );
       }
     },
@@ -2304,7 +2361,8 @@ describe("GitHub release workflow safeguards", () => {
         "    fi",
         '    case "$method $1" in',
         '      "GET repos/test/codex-security/releases/tags/npm-v0.1.2")',
-        '        printf \'{"tag_name":"npm-v0.1.2","draft":false,"prerelease":false,"body":"%s","assets":[]}\\n\' "$MOCK_EXISTING_NOTES"',
+        '        if [[ "$include" != "true" ]]; then return 71; fi',
+        '        printf \'HTTP/2.0 200 OK\\ncontent-type: application/json\\n\\n{"tag_name":"npm-v0.1.2","draft":false,"prerelease":false,"body":"%s","assets":[]}\\n\' "$MOCK_EXISTING_NOTES"',
         "        ;;",
         '      "GET repos/test/codex-security/releases/latest")',
         '        if [[ "$include" != "true" ]]; then return 71; fi',
