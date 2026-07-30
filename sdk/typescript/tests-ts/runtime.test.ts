@@ -58,6 +58,7 @@ import {
   requirePrivateCredentialHome,
   requirePrivateOutputDirectory,
   requireSecureOutputAncestry,
+  requireTrustedOutputAncestor,
   runWorkbench,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
@@ -1711,6 +1712,26 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(await prepareOutputDir(output, "repo")).toBe(output);
     },
   );
+
+  testPosix("rejects sticky shared parents controlled by another user", () => {
+    expect(() =>
+      requireTrustedOutputAncestor(
+        { mode: 0o41777, uid: 1001 },
+        "/shared",
+        1000,
+      ),
+    ).toThrow("trusted owner");
+    expect(() =>
+      requireTrustedOutputAncestor(
+        { mode: 0o41777, uid: 1000 },
+        "/shared",
+        1000,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      requireTrustedOutputAncestor({ mode: 0o41777, uid: 0 }, "/tmp", 1000),
+    ).not.toThrow();
+  });
 
   test("archives a non-empty private output directory", async () => {
     const root = await temporaryDirectory();

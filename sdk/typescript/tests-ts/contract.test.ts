@@ -138,6 +138,23 @@ describe("canonical scan contract", () => {
   );
 
   test.skipIf(process.platform === "win32")(
+    "rejects a private scan beneath an insecure shared ancestor",
+    async () => {
+      const scanDir = await copyExample();
+      const parent = dirname(scanDir);
+      await chmod(parent, 0o777);
+
+      try {
+        await expect(
+          loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+        ).rejects.toThrow("sticky bit");
+      } finally {
+        await chmod(parent, 0o700);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "accepts a scan directory beneath a symlinked parent",
     async () => {
       const root = await mkdtemp(

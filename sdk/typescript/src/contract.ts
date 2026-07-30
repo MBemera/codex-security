@@ -17,7 +17,10 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
-import { requirePrivateOutputDirectory } from "./runtime.js";
+import {
+  requirePrivateOutputDirectory,
+  requireSecureOutputAncestry,
+} from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 
 const DOCUMENTS = {
@@ -584,6 +587,7 @@ async function requireScanRoot(
     }
     try {
       requirePrivateOutputDirectory(returned, canonical);
+      await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
         error instanceof Error
@@ -618,6 +622,7 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
+    await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
     throw new ContractValidationError(

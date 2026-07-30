@@ -728,8 +728,11 @@ export function requirePrivateOutputDirectory(
   }
 }
 
-/** Reject parents that other users can rename entries out of (non-sticky shared dirs). */
-export async function requireSecureOutputAncestry(path: string): Promise<void> {
+/** Reject shared parents whose owner can rename or replace private scan output. */
+export async function requireSecureOutputAncestry(
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): Promise<void> {
   if (process.platform === "win32") return;
   let current = dirname(resolve(path));
   while (true) {
@@ -768,16 +771,32 @@ export async function requireSecureOutputAncestry(path: string): Promise<void> {
         `Scan output parent must be a non-symlink directory: ${current}`,
       );
     }
-    // Group/world-writable parents need the sticky bit so other users cannot
-    // rename or replace the private scan directory mid-scan.
-    if ((metadata.mode & 0o022) !== 0 && (metadata.mode & 0o1000) === 0) {
-      throw new OutputDirectoryError(
-        `Scan output parent must not be group- or world-writable without the sticky bit: ${current}`,
-      );
-    }
+    requireTrustedOutputAncestor(metadata, current, effectiveUid);
     const parent = dirname(current);
     if (parent === current) return;
     current = parent;
+  }
+}
+
+export function requireTrustedOutputAncestor(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if ((metadata.mode & 0o022) === 0) return;
+  if ((metadata.mode & 0o1000) === 0) {
+    throw new OutputDirectoryError(
+      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
+    );
+  }
+  if (
+    effectiveUid !== undefined &&
+    metadata.uid !== 0 &&
+    metadata.uid !== effectiveUid
+  ) {
+    throw new OutputDirectoryError(
+      `A sticky shared scan output parent must have a trusted owner: ${path}`,
+    );
   }
 }
 
