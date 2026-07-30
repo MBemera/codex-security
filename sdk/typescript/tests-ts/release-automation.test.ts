@@ -2052,6 +2052,7 @@ describe("GitHub release workflow safeguards", () => {
           "}",
           "node() {",
           '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" ]]; then',
+          "    cat >/dev/null",
           '    case "$2" in',
           "      verify-publication)",
           "        printf '%s\\n' 'verified published artifact'",
